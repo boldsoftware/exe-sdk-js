@@ -30,10 +30,12 @@
   "author": "exe.dev",
   "license": "MIT",
   "homepage": "https://exe.dev/docs/https-api",
+  "bugs": {
+    "url": "https://github.com/boldsoftware/exe-sdk-js/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/nicehash/exe",
-    "directory": "sdk/js"
+    "url": "git+https://github.com/boldsoftware/exe-sdk-js.git"
   },
   "devDependencies": {
     "typescript": "^5.8.0"
