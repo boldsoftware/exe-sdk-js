@@ -65,11 +65,13 @@ test("integration", { skip, timeout: 180_000 }, async (t) => {
   });
 
   await t.test("new", async () => {
-    assert.equal(await exe.new(name), name);
+    const vm = await exe.new({ name });
+    assert.equal(vm.vm_name, name);
+    assert.ok(vm.tags.includes(tag), `new returned tags ${JSON.stringify(vm.tags)}, want ${tag}`);
   });
 
   await t.test(`ls shows the new VM, tagged ${tag}`, async () => {
-    const vm = (await exe.ls()).find((vm) => vm.vm_name === name);
+    const vm = (await exe.ls()).vms.find((vm) => vm.vm_name === name);
     assert.ok(vm, `${name} not in ls`);
     assert.ok(
       vm.tags.includes(tag),
@@ -87,35 +89,52 @@ test("integration", { skip, timeout: 180_000 }, async (t) => {
     assert.ok(st.points === null || Array.isArray(st.points));
   });
 
+  await t.test("ls with a pattern", async () => {
+    const { vms } = await exe.ls(name);
+    assert.deepEqual(vms.map((vm) => vm.vm_name), [name]);
+  });
+
   await t.test("shareShow", async () => {
-    const share = JSON.parse(await exe.shareShow(name));
+    const share = await exe.shareShow(name);
     assert.equal(share.vm_name, name);
   });
 
   await t.test("sshKeyList", async () => {
-    const keys = JSON.parse(await exe.sshKeyList());
+    const keys = await exe.sshKeyList();
     assert.ok(Array.isArray(keys.ssh_keys));
   });
 
   await t.test("restart", async () => {
-    await exe.restart(name);
+    assert.deepEqual(await exe.restart(name), { status: "restarted", vm_name: name });
   });
 
   await t.test("rename", async () => {
-    await exe.rename(name, renamed);
-    const names = (await exe.ls()).map((vm) => vm.vm_name);
+    assert.deepEqual(await exe.rename(name, renamed), {
+      status: "renamed",
+      old_name: name,
+      new_name: renamed,
+    });
+    const names = (await exe.ls()).vms.map((vm) => vm.vm_name);
     assert.ok(names.includes(renamed), `${renamed} not in ls`);
     assert.ok(!names.includes(name), `${name} still in ls`);
   });
 
   await t.test("rm", async () => {
-    await exe.rm(renamed);
-    const names = (await exe.ls()).map((vm) => vm.vm_name);
+    assert.deepEqual(await exe.rm(renamed), { deleted: [renamed], failed: [] });
+    const names = (await exe.ls()).vms.map((vm) => vm.vm_name);
     assert.ok(!names.includes(renamed), `${renamed} still in ls`);
   });
 
   await t.test("rm of a missing VM throws", async () => {
     await assert.rejects(exe.rm(missing), ExeAPIError);
+  });
+
+  await t.test("a command tag-scoped keys may not run throws 403", async () => {
+    await assert.rejects(exe.billingPlan(), (err) => {
+      assert.ok(err instanceof ExeAPIError);
+      assert.equal(err.status, 403);
+      return true;
+    });
   });
 
   await t.test("restart of a missing VM throws", async () => {

@@ -15,27 +15,21 @@ import exedev from "@exedev/sdk";
 
 const exe = exedev({ token: process.env.EXE_TOKEN! });
 
-// List all VMs
-const vms = await exe.ls();
-console.log(vms);
+// Every exe.dev command is a method. Positional arguments are parameters;
+// flags go in an options object, spelled as on the command line.
+const vm = await exe.new({ name: "my-vm", image: "ubuntu:24.04", tag: ["dev"] });
+console.log(vm.https_url);
 
-// Get your identity
-const me = await exe.whoami();
-console.log(me.email);
+const { vms } = await exe.ls();
+await exe.resize("my-vm", { memory: "8GB" });
+await exe.pause("my-vm");
+await exe.resume("my-vm");
+await exe.shareAdd("my-vm", "friend@example.com", { message: "have a look" });
+await exe.rm("my-vm");
 
-// Create a VM
-await exe.new("my-vm", { image: "ubuntu:24.04" });
-
-// Get VM details
-const info = await exe.stat("my-vm");
-console.log(info);
-
-// Run any command
+// Run a raw command line.
 const result = await exe.exec("help");
 console.log(result.body);
-
-// Delete a VM
-await exe.rm("my-vm");
 ```
 
 ## Authentication
@@ -43,7 +37,7 @@ await exe.rm("my-vm");
 Generate an API token via SSH:
 
 ```sh
-ssh exe.dev token
+ssh exe.dev ssh-key generate-api-key --label=my-app --exp=30d
 ```
 
 See the [HTTPS API docs](https://exe.dev/docs/https-api) for full details on
@@ -57,23 +51,24 @@ authentication, token permissions, and scoping.
 | --------- | ------ | -------- | ------------------- |
 | `token`   | string | Yes      |                     |
 | `baseURL` | string | No       | `https://exe.dev`   |
+| `fetch`   | function | No     | global `fetch`      |
 
-### Methods
+### Commands
 
-| Method | Description |
-| --- | --- |
-| `exec(command)` | Run any command (raw) |
-| `ls()` | List VMs |
-| `whoami()` | Get authenticated user |
-| `stat(vmName)` | Get VM details |
-| `new(name?, options?)` | Create a VM (`options`: `image`, `tags`); returns its name |
-| `rm(vmName)` | Delete a VM |
-| `restart(vmName)` | Restart a VM |
-| `rename(oldName, newName)` | Rename a VM |
-| `sshKeyList()` | List SSH keys |
-| `shareShow(vmName)` | Show sharing settings |
+Each public exe.dev command that runs over the HTTPS API is a method, named by
+camel-casing its path: `ls`, `new`, `ssh-key list` is `sshKeyList`,
+`team settings auto-join` is `teamSettingsAutoJoin`. Each method's doc comment
+is the command's own help text, so `help <command>` and your editor agree.
 
-All methods accept an optional `{ signal: AbortSignal }` as the last argument for cancellation.
+Methods resolve to the command's JSON output, typed for the commands listed in
+`CommandResults` (`src/types.ts`) and `unknown` otherwise. They reject with
+`ExeAPIError` (`status`, `command`, `body`) when a command fails. Every
+options object accepts `signal` (an `AbortSignal`) for cancellation.
+
+The command methods live in `src/commands.gen.ts`, which is generated from the
+exe.dev command tree; don't edit it by hand. To pick up new commands, run
+`npm run sync-commands -- path/to/exe` (default `../exe`) with an up-to-date
+checkout of the exe.dev repository, then `npm test`.
 
 ### Named import
 

@@ -59,7 +59,55 @@ export interface StatResponse {
   points: StatPoint[] | null;
 }
 
-/** The response to `new`. Only the fields the SDK relies on are listed. */
+/** The response to `new`. */
 export interface NewResponse {
   vm_name: string;
+  tags: string[];
+  ssh_command: string;
+  ssh_dest: string;
+  ssh_host: string;
+  ssh_user?: string;
+  ssh_port: number;
+  https_url: string;
+  proxy_port: number;
+  shelley_url?: string;
+  vscode_url?: string;
+  xterm_url?: string;
+  pool_id?: string;
+  standalone?: boolean;
+  /** Set when the VM was created but a later setup step failed. */
+  error?: string;
+}
+
+/** The response to `rm`. */
+export interface RmResponse {
+  deleted: string[];
+  failed: string[];
+}
+
+/** The response to `restart`. */
+export interface RestartResponse {
+  status: "restarted";
+  vm_name: string;
+}
+
+/** The response to `rename`. */
+export interface RenameResponse {
+  status: "renamed";
+  old_name: string;
+  new_name: string;
+}
+
+/**
+ * Result types by command path. A command method resolves to the type listed
+ * here for its path, or to unknown.
+ */
+export interface CommandResults {
+  ls: VMListResponse;
+  new: NewResponse;
+  rm: RmResponse;
+  restart: RestartResponse;
+  rename: RenameResponse;
+  stat: StatResponse;
+  whoami: WhoamiResponse;
 }

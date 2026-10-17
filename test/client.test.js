@@ -2,6 +2,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import exedev, { ExeAPIError } from "../dist/index.js";
+import { quote } from "../dist/client.js";
 
 let requests;
 let respond;
@@ -9,13 +10,19 @@ let respond;
 beforeEach(() => {
   requests = [];
   respond = () => new Response("{}", { status: 200 });
-  globalThis.fetch = async (url, init) => {
-    requests.push({ url, init });
-    return respond(url, init);
-  };
 });
 
-const exe = () => exedev({ token: "exe1.test", baseURL: "https://example.test/" });
+const exe = () =>
+  exedev({
+    token: "exe1.test",
+    baseURL: "https://example.test/",
+    fetch: async (url, init) => {
+      requests.push({ url, init });
+      return respond(url, init);
+    },
+  });
+
+const sent = () => requests.map((r) => r.init.body);
 
 test("exec posts the command with a bearer token", async () => {
   respond = () => new Response("hello", { status: 200 });
@@ -27,42 +34,87 @@ test("exec posts the command with a bearer token", async () => {
   assert.equal(requests[0].init.body, "help");
 });
 
-test("new passes the name as --name and returns vm_name", async () => {
-  respond = () =>
-    new Response(JSON.stringify({ vm_name: "my-vm", ssh_dest: "my-vm.exe.xyz" }));
-  assert.equal(await exe().new("my-vm"), "my-vm");
-  assert.equal(requests[0].init.body, "new --name=my-vm");
+test("a token is required", () => {
+  assert.throws(() => exedev({ token: "" }), /token is required/);
 });
 
-test("new with no name lets exe.dev pick one", async () => {
-  respond = () => new Response(JSON.stringify({ vm_name: "auto-name" }));
-  assert.equal(await exe().new(), "auto-name");
-  assert.equal(requests[0].init.body, "new");
+test("command methods return the parsed JSON", async () => {
+  respond = () => new Response(JSON.stringify({ vm_name: "my-vm", tags: [] }));
+  assert.deepEqual(await exe().new({ name: "my-vm" }), { vm_name: "my-vm", tags: [] });
+  assert.deepEqual(sent(), ["new --name=my-vm"]);
 });
 
-test("new passes image and tags", async () => {
-  respond = () => new Response(JSON.stringify({ vm_name: "my-vm" }));
-  await exe().new("my-vm", { image: "ubuntu:24.04", tags: ["a", "b"] });
-  assert.equal(requests[0].init.body, "new --name=my-vm --image=ubuntu:24.04 --tag=a,b");
+test("options become flags, spelled as on the command line", async () => {
+  await exe().new({
+    name: "my-vm",
+    image: "ubuntu:24.04",
+    tag: ["a", "b"],
+    env: "FOO=bar baz",
+    "no-email": true,
+    sandbox: false,
+    cpu: 4,
+  });
+  assert.deepEqual(sent(), [
+    "new --name=my-vm --image=ubuntu:24.04 --tag=a --tag=b --env='FOO=bar baz' --no-email --sandbox=false --cpu=4",
+  ]);
 });
 
-test("new throws ExeAPIError on failure", async () => {
+test("unknown options are rejected before any request", async () => {
+  await assert.rejects(exe().new({ nope: 1 }), TypeError);
+  assert.deepEqual(sent(), []);
+});
+
+test("positionals: optional, variadic, and quoted", async () => {
+  const c = exe();
+  await c.ls();
+  await c.ls("web-*", { l: true });
+  await c.rm(["a", "b"]);
+  await c.rm("a");
+  await c.rename("old", "new");
+  await c.comment("my-vm", "it's a VM");
+  await c.cp("src");
+  assert.deepEqual(sent(), [
+    "ls",
+    "ls --l 'web-*'",
+    "rm a b",
+    "rm a",
+    "rename old new",
+    `comment my-vm 'it'"'"'s a VM'`,
+    "cp src",
+  ]);
+});
+
+test("a positional that looks like a flag follows --", async () => {
+  await exe().comment("my-vm", "-x");
+  assert.deepEqual(sent(), ["comment -- my-vm -x"]);
+});
+
+test("subcommand paths become camel-cased methods", async () => {
+  await exe().sshKeyList();
+  await exe().shareShow("my-vm");
+  assert.deepEqual(sent(), ["ssh-key list", "share show my-vm"]);
+});
+
+test("quote", () => {
+  assert.equal(quote("plain-word_1.2/x:y@z,w=v"), "plain-word_1.2/x:y@z,w=v");
+  assert.equal(quote(""), "''");
+  assert.equal(quote("a b"), "'a b'");
+  assert.equal(quote(`"$HOME"`), `'"$HOME"'`);
+  assert.equal(quote("it's"), `'it'"'"'s'`);
+});
+
+test("failures throw ExeAPIError with the server's message", async () => {
   respond = () => new Response('{"error":"nope"}', { status: 422 });
-  await assert.rejects(exe().new("my-vm"), (err) => {
+  await assert.rejects(exe().new({ name: "my-vm" }), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.status, 422);
     assert.equal(err.command, "new --name=my-vm");
+    assert.equal(err.message, "exe.dev API error (422): nope");
     return true;
   });
 });
 
-test("rm resolves when the VM is deleted", async () => {
-  respond = () => new Response('{"deleted":["my-vm"],"failed":[]}\n');
-  await exe().rm("my-vm");
-  assert.equal(requests[0].init.body, "rm my-vm");
-});
-
-test("rm throws when the VM is not deleted, despite a 200", async () => {
+test("an error document throws despite a 200", async () => {
   // What exe.dev returns for rm of a VM that does not exist.
   respond = () =>
     new Response(
@@ -72,6 +124,17 @@ test("rm throws when the VM is not deleted, despite a 200", async () => {
   await assert.rejects(exe().rm("my-vm"), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.command, "rm my-vm");
+    assert.equal(err.message, 'exe.dev API error (200): VM "my-vm" not found');
     return true;
   });
+});
+
+test("a result with an error field alongside others is not a failure", async () => {
+  respond = () => new Response('{"vm_name":"my-vm","error":"shelley setup failed"}');
+  assert.equal((await exe().new()).vm_name, "my-vm");
+});
+
+test("non-JSON output is returned as text", async () => {
+  respond = () => new Response("Usage: team vm ls\n");
+  assert.equal(await exe().teamMembers(), "Usage: team vm ls\n");
 });
