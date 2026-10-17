@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "tsc && node --test test/",
+    "test": "tsc && node --test test/*.test.js",
     "sync-commands": "sh scripts/sync-commands.sh",
     "prepublishOnly": "npm run build"
   },
