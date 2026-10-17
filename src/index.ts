@@ -8,4 +8,11 @@ export type {
   ExecResult,
   NewOptions,
 } from "./client.js";
-export type { VM, VMListResponse, WhoamiResponse, StatResponse } from "./types.js";
+export type {
+  VM,
+  VMListResponse,
+  WhoamiResponse,
+  WhoamiSSHKey,
+  StatResponse,
+  StatPoint,
+} from "./types.js";

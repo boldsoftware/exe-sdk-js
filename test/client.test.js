@@ -55,3 +55,23 @@ test("new throws ExeAPIError on failure", async () => {
     return true;
   });
 });
+
+test("rm resolves when the VM is deleted", async () => {
+  respond = () => new Response('{"deleted":["my-vm"],"failed":[]}\n');
+  await exe().rm("my-vm");
+  assert.equal(requests[0].init.body, "rm my-vm");
+});
+
+test("rm throws when the VM is not deleted, despite a 200", async () => {
+  // What exe.dev returns for rm of a VM that does not exist.
+  respond = () =>
+    new Response(
+      '{"error":"VM \\"my-vm\\" not found"}\n{"deleted":[],"failed":["my-vm"]}\n',
+      { status: 200 },
+    );
+  await assert.rejects(exe().rm("my-vm"), (err) => {
+    assert.ok(err instanceof ExeAPIError);
+    assert.equal(err.command, "rm my-vm");
+    return true;
+  });
+});

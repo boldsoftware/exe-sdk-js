@@ -140,7 +140,9 @@ export default function exedev(opts: ExedevOptions): ExedevClient {
 
     async rm(vmName: string, execOpts?: ExecOptions): Promise<void> {
       const result = await exec(`rm ${vmName}`, execOpts);
-      if (!result.ok) {
+      // rm reports a VM it could not delete with a 200 status, an error
+      // document, and the VM listed under "failed".
+      if (!result.ok || rmFailed(result.body)) {
         throw new ExeAPIError(`rm ${vmName}`, result.status, result.body);
       }
     },
@@ -189,7 +191,29 @@ export default function exedev(opts: ExedevOptions): ExedevClient {
   };
 }
 
-/** Error thrown when the exe.dev API returns a non-2xx status. */
+/**
+ * Reports whether an rm response body describes a failure. The body is one
+ * or more newline-separated JSON documents.
+ */
+function rmFailed(body: string): boolean {
+  for (const line of body.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    let doc: { error?: unknown; failed?: unknown };
+    try {
+      doc = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (doc.error || (Array.isArray(doc.failed) && doc.failed.length > 0)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Error thrown when the exe.dev API reports a failed command. */
 export class ExeAPIError extends Error {
   public readonly command: string;
   public readonly status: number;
