@@ -24,7 +24,7 @@ const me = await exe.whoami();
 console.log(me.email);
 
 // Create a VM
-await exe.new("my-vm", { region: "lon" });
+await exe.new("my-vm", { image: "ubuntu:24.04" });
 
 // Get VM details
 const info = await exe.stat("my-vm");
@@ -66,7 +66,7 @@ authentication, token permissions, and scoping.
 | `ls()` | List VMs |
 | `whoami()` | Get authenticated user |
 | `stat(vmName)` | Get VM details |
-| `new(name, options?)` | Create a VM |
+| `new(name?, options?)` | Create a VM (`options`: `image`, `tags`); returns its name |
 | `rm(vmName)` | Delete a VM |
 | `restart(vmName)` | Restart a VM |
 | `rename(oldName, newName)` | Rename a VM |

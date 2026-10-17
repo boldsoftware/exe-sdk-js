@@ -28,3 +28,8 @@ export interface StatResponse {
   ssh_dest: string;
   https_url: string;
 }
+
+/** The response to `new`. Only the fields the SDK relies on are listed. */
+export interface NewResponse {
+  vm_name: string;
+}

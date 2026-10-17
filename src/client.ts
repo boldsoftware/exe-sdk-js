@@ -1,4 +1,10 @@
-import type { VM, VMListResponse, WhoamiResponse, StatResponse } from "./types.js";
+import type {
+  VM,
+  VMListResponse,
+  WhoamiResponse,
+  StatResponse,
+  NewResponse,
+} from "./types.js";
 
 export interface ExedevOptions {
   /** Bearer token (exe0.* or exe1.*). */
@@ -21,6 +27,13 @@ export interface ExecResult {
   ok: boolean;
 }
 
+export interface NewOptions {
+  /** Container image. Defaults to "exeuntu". */
+  image?: string;
+  /** Tags to add to the VM. */
+  tags?: string[];
+}
+
 export interface ExedevClient {
   /** Execute a raw command against the exe.dev API. */
   exec(command: string, opts?: ExecOptions): Promise<ExecResult>;
@@ -30,8 +43,13 @@ export interface ExedevClient {
   whoami(opts?: ExecOptions): Promise<WhoamiResponse>;
   /** Get detailed status of a VM. */
   stat(vmName: string, opts?: ExecOptions): Promise<StatResponse>;
-  /** Create a new VM. Returns the VM name. */
-  "new"(name: string, options?: { region?: string }, opts?: ExecOptions): Promise<string>;
+  /**
+   * Create a new VM. Returns the VM name.
+   *
+   * If `name` is omitted or empty, exe.dev picks one. New VMs are created in
+   * the account's region.
+   */
+  "new"(name?: string, options?: NewOptions, opts?: ExecOptions): Promise<string>;
   /** Delete a VM. */
   rm(vmName: string, opts?: ExecOptions): Promise<void>;
   /** Restart a VM. */
@@ -102,19 +120,22 @@ export default function exedev(opts: ExedevOptions): ExedevClient {
     },
 
     async new(
-      name: string,
-      options?: { region?: string },
+      name?: string,
+      options?: NewOptions,
       execOpts?: ExecOptions,
     ): Promise<string> {
-      let cmd = `new ${name}`;
-      if (options?.region) {
-        cmd += ` --region=${options.region}`;
+      let cmd = "new";
+      if (name) {
+        cmd += ` --name=${name}`;
       }
-      const result = await exec(cmd, execOpts);
-      if (!result.ok) {
-        throw new ExeAPIError(cmd, result.status, result.body);
+      if (options?.image) {
+        cmd += ` --image=${options.image}`;
       }
-      return result.body.trim();
+      if (options?.tags?.length) {
+        cmd += ` --tag=${options.tags.join(",")}`;
+      }
+      const res = await execJSON<NewResponse>(cmd, execOpts);
+      return res.vm_name;
     },
 
     async rm(vmName: string, execOpts?: ExecOptions): Promise<void> {

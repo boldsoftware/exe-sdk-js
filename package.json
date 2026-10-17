@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "tsc && node --test test/",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
