@@ -1,27 +1,129 @@
-// Integration tests against the real exe.dev API. Skipped unless EXE_TOKEN
-// is set. Creates and deletes a VM, so use a tag-scoped token: VMs created
-// with it are tagged automatically, and it cannot touch any other VM.
+// Integration tests against the real exe.dev API.
+//
+// These need a tag-scoped API token (see "Development" in README.md), read
+// from $EXE_TOKEN or ~/.config/exedev/sdk-test-token. They fail without one;
+// set EXE_SKIP_INTEGRATION=1 to skip them instead.
+//
+// The tests create, restart, rename, and delete a VM. A tag-scoped token
+// tags every VM it creates and can see or touch no other VM, and the tests
+// check that the VM they create carries the expected tag ($EXE_TEST_TAG,
+// default "sdk-test").
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import exedev from "../dist/index.js";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import exedev, { ExeAPIError } from "../dist/index.js";
 
-const token = process.env.EXE_TOKEN;
-const skip = token ? false : "EXE_TOKEN not set";
+const tokenFile = join(homedir(), ".config", "exedev", "sdk-test-token");
+const tag = process.env.EXE_TEST_TAG || "sdk-test";
 
-test("VM lifecycle", { skip, timeout: 120_000 }, async (t) => {
+function loadToken() {
+  if (process.env.EXE_TOKEN) {
+    return process.env.EXE_TOKEN.trim();
+  }
+  try {
+    return readFileSync(tokenFile, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+const token = loadToken();
+const skip = process.env.EXE_SKIP_INTEGRATION ? "EXE_SKIP_INTEGRATION is set" : false;
+
+test("integration", { skip, timeout: 180_000 }, async (t) => {
+  assert.ok(
+    token,
+    `no API token: set EXE_TOKEN or write one to ${tokenFile} ` +
+      `(see "Development" in README.md), or set EXE_SKIP_INTEGRATION=1`,
+  );
   const exe = exedev({ token, baseURL: process.env.EXE_BASE_URL });
   const name = `sdk-test-${Date.now().toString(36)}`;
+  const renamed = `${name}-r`;
+  const missing = `${name}-missing`;
 
-  const me = await exe.whoami();
-  assert.match(me.email, /@/);
+  t.after(async () => {
+    // Best-effort cleanup if a step below failed partway.
+    for (const vm of [name, renamed]) {
+      await exe.rm(vm).catch(() => {});
+    }
+  });
 
-  assert.equal(await exe.new(name), name);
-  t.after(() => exe.rm(name).catch(() => {}));
+  await t.test("whoami", async () => {
+    const me = await exe.whoami();
+    assert.match(me.email, /@/);
+    assert.equal(typeof me.region, "string");
+    assert.ok(Array.isArray(me.ssh_keys));
+  });
 
-  const vms = await exe.ls();
-  assert.ok(vms.some((vm) => vm.vm_name === name), `${name} not in ls`);
+  await t.test("exec", async () => {
+    const res = await exe.exec("help");
+    assert.equal(res.status, 200);
+    assert.ok(res.ok);
+    assert.ok(Array.isArray(JSON.parse(res.body).commands));
+  });
 
-  await exe.rm(name);
-  const after = await exe.ls();
-  assert.ok(!after.some((vm) => vm.vm_name === name), `${name} still in ls after rm`);
+  await t.test("new", async () => {
+    assert.equal(await exe.new(name), name);
+  });
+
+  await t.test(`ls shows the new VM, tagged ${tag}`, async () => {
+    const vm = (await exe.ls()).find((vm) => vm.vm_name === name);
+    assert.ok(vm, `${name} not in ls`);
+    assert.ok(
+      vm.tags.includes(tag),
+      `${name} has tags ${JSON.stringify(vm.tags)}, want ${tag}: is the token tag-scoped?`,
+    );
+    assert.match(vm.ssh_dest, new RegExp(`^${name}\\.`));
+    assert.match(vm.https_url, /^https:\/\//);
+  });
+
+  await t.test("stat", async () => {
+    const st = await exe.stat(name);
+    assert.equal(st.name, name);
+    assert.equal(typeof st.status, "string");
+    assert.equal(typeof st.range, "string");
+    assert.ok(st.points === null || Array.isArray(st.points));
+  });
+
+  await t.test("shareShow", async () => {
+    const share = JSON.parse(await exe.shareShow(name));
+    assert.equal(share.vm_name, name);
+  });
+
+  await t.test("sshKeyList", async () => {
+    const keys = JSON.parse(await exe.sshKeyList());
+    assert.ok(Array.isArray(keys.ssh_keys));
+  });
+
+  await t.test("restart", async () => {
+    await exe.restart(name);
+  });
+
+  await t.test("rename", async () => {
+    await exe.rename(name, renamed);
+    const names = (await exe.ls()).map((vm) => vm.vm_name);
+    assert.ok(names.includes(renamed), `${renamed} not in ls`);
+    assert.ok(!names.includes(name), `${name} still in ls`);
+  });
+
+  await t.test("rm", async () => {
+    await exe.rm(renamed);
+    const names = (await exe.ls()).map((vm) => vm.vm_name);
+    assert.ok(!names.includes(renamed), `${renamed} still in ls`);
+  });
+
+  await t.test("rm of a missing VM throws", async () => {
+    await assert.rejects(exe.rm(missing), ExeAPIError);
+  });
+
+  await t.test("restart of a missing VM throws", async () => {
+    await assert.rejects(exe.restart(missing), (err) => {
+      assert.ok(err instanceof ExeAPIError);
+      assert.equal(err.status, 422);
+      assert.equal(err.command, `restart ${missing}`);
+      return true;
+    });
+  });
 });
