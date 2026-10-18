@@ -98,6 +98,9 @@ export interface CpResponse {
   ssh: string;
   ssh_host: string;
   ssh_user?: string;
+  https_url: string;
+  /** The copy's tags: the source's, unless --copy-tags=false. */
+  tags: string[];
   /** How long the copy took, in seconds. */
   elapsed: number;
   /** The pool the new VM is in, if any. */
@@ -130,17 +133,340 @@ export interface RenameResponse {
   new_name: string;
 }
 
+/** The response to `pause`. */
+export interface PauseResponse {
+  vm_name: string;
+  status: "paused";
+}
+
+/** The response to `resume`. */
+export interface ResumeResponse {
+  vm_name: string;
+  status: "running";
+  /**
+   * "true" when the VM booted from disk instead of restoring its RAM
+   * snapshot, so its in-memory state is gone. A string, not a boolean.
+   */
+  cold_booted: "true" | "false";
+}
+
+/** A request to grow a VM's disk past its self-serve limit. */
+export interface DiskResizeRequest {
+  status: "pending" | "approved" | "rejected" | "superseded" | "cancelled";
+  requested_disk_bytes: number;
+  /** RFC 3339. */
+  requested_at: string;
+  /** RFC 3339; absent while pending. */
+  resolved_at?: string;
+}
+
+/**
+ * The response to `resize`. Each group of fields is present only when the
+ * command changed (or requested) that resource. Sizes are in bytes.
+ */
+export interface ResizeResponse {
+  vm_name: string;
+  /** With --memory or --cpu. A change takes effect after a restart. */
+  old_memory?: number;
+  new_memory?: number;
+  old_cpus?: number;
+  new_cpus?: number;
+  /** With --disk within the self-serve limit: the disk has grown. */
+  disk_old_bytes?: number;
+  disk_new_bytes?: number;
+  /**
+   * With --disk above the self-serve limit: support must approve the size,
+   * and the disk stays at disk_capacity_bytes until then.
+   */
+  disk_resize_pending_approval?: true;
+  disk_capacity_bytes?: number;
+  requested_disk_bytes?: number;
+  self_serve_max_disk_bytes?: number;
+  approval_max_disk_bytes?: number;
+  /** Why approval is needed: "per_vm" (the VM's limit) or "host". */
+  approval_reasons?: string[];
+  disk_resize_request?: DiskResizeRequest;
+}
+
+/** The response to `comment`. */
+export interface CommentResponse {
+  vm_name: string;
+  /** The comment as stored; "" when cleared. */
+  comment: string;
+}
+
+/** The response to `tag`. */
+export interface TagResponse {
+  vm_name: string;
+  /** All of the VM's tags after the change. */
+  tags: string[];
+}
+
+/** `domain add` registered the domain. */
+export interface DomainAdded {
+  vm_name: string;
+  domain: string;
+  wildcard: boolean;
+  /** With a wildcard certificate: the base it covers. */
+  wildcard_base?: string;
+  /** For a `*.<base>` pattern. */
+  pattern?: true;
+}
+
+/**
+ * `domain add` found that the domain's DNS does not point to the VM. Nothing
+ * was added: point it at `expected` and run the command again.
+ */
+export interface DomainAddDNSMismatch {
+  error: string;
+  vm_name: string;
+  domain: string;
+  expected: string;
+}
+
+/**
+ * `domain add --wildcard` found no ACME challenge delegation. Nothing was
+ * added: CNAME `delegation_name` to `delegation_target` and run the command
+ * again.
+ */
+export interface DomainAddDelegationMissing {
+  error: string;
+  vm_name: string;
+  domain: string;
+  wildcard_base: string;
+  delegation_name: string;
+  delegation_target: string;
+}
+
+/**
+ * The response to `domain add`. A DNS problem is not an exception: the
+ * command succeeds with an `error` field, so check `"error" in result`.
+ */
+export type DomainAddResponse = DomainAdded | DomainAddDNSMismatch | DomainAddDelegationMissing;
+
+/** The response to `domain rm`. */
+export interface DomainRmResponse {
+  vm_name: string;
+  domain: string;
+  removed: true;
+}
+
+/** An email share in `share show`. */
+export interface ShareUser {
+  email: string;
+  /** "pending" until the recipient has an account. */
+  status: "pending" | "active";
+  /** RFC 3339, or "" when unknown. */
+  invited_at: string;
+  /** "root" also grants shell access. */
+  share_level: "web" | "root";
+}
+
+/** A share link in `share show`. */
+export interface ShareLink {
+  token: string;
+  /** RFC 3339, or "" when unknown. */
+  created_at: string;
+  use_count: number;
+  /** RFC 3339; null until first use. */
+  last_used_at: string | null;
+}
+
+/** A team share in `share show`. */
+export interface ShareTeam {
+  team_id: string;
+  team_name: string;
+}
+
+export interface ShareSSOClaim {
+  name: string;
+  value: string;
+}
+
+/** A VM's SSO share in `share show`. */
+export interface ShareSSO {
+  active: boolean;
+  /** The identity provider, while active. */
+  issuer?: string;
+  claim: ShareSSOClaim;
+}
+
+/** The response to `share show`. */
+export interface ShareShowResponse {
+  vm_name: string;
+  /** Whether the VM's web port is public or requires a login. */
+  status: "public" | "private";
+  /** The port inside the VM that the web URL forwards to. */
+  port: number;
+  url: string;
+  users: ShareUser[];
+  links: ShareLink[];
+  teams: ShareTeam[];
+  /** team_ssh && team_shelley. */
+  team_access: boolean;
+  team_ssh: boolean;
+  team_shelley: boolean;
+  /** Present, and true, when exe.dev support has root access. */
+  support_has_root?: true;
+  /** Present, and true, when the proxy forwards the SSO access token. */
+  forward_access_token?: true;
+  /** Present when the VM has an SSO share. */
+  sso?: ShareSSO;
+}
+
+/** `share port <vm>` without a port: the VM's web route. */
+export interface ShareRoute {
+  vm_name: string;
+  /** The port inside the VM that the web URL forwards to. */
+  port: number;
+  share: "public" | "private";
+}
+
+/** The changed route: `share port <vm> <port>`, `share set-public`, `share set-private`. */
+export interface ShareRouteUpdate extends ShareRoute {
+  status: "updated";
+  /** team_ssh && team_shelley. */
+  team_access: boolean;
+  team_ssh: boolean;
+  team_shelley: boolean;
+}
+
+/** The response to `share port`: the route, or the updated route when given a port. */
+export type SharePortResponse = ShareRoute | ShareRouteUpdate;
+
+/** `share add <vm> <email>`. */
+export interface ShareInvite {
+  status: "success";
+  vm_name: string;
+  shared_with: string;
+  url: string;
+  /** "Invitation sent", or "Share created" with --no-email. */
+  message: string;
+}
+
+/** `share add <vm> team` or `share remove <vm> team`. */
+export interface ShareTeamChange {
+  status: "success";
+  vm_name: string;
+  team_name: string;
+}
+
+/**
+ * A share change described in words: `share remove <vm> <email>`,
+ * `share remove-link`, and `share add <vm> team` when already shared.
+ */
+export interface ShareMessage {
+  status: "success";
+  vm_name: string;
+  message: string;
+}
+
+/** `share add|remove <vm> <email> --root`: the recipient's resulting access. */
+export interface ShareRootChange {
+  status: "updated";
+  vm_name: string;
+  shared_with: string;
+  /** "root" after `share add`; "web" after `share remove`, which keeps web access. */
+  share_level: "root" | "web";
+}
+
+/** `share add|remove <vm> team --root`: the team's resulting access. */
+export interface ShareTeamRootChange {
+  status: "updated";
+  vm_name: string;
+  team_access: boolean;
+  team_ssh: boolean;
+  team_shelley: boolean;
+}
+
+/** The response to `share add`, which depends on its arguments. */
+export type ShareAddResponse = ShareInvite | ShareTeamChange | ShareMessage | ShareRootChange | ShareTeamRootChange;
+
+/** The response to `share remove`, which depends on its arguments. */
+export type ShareRemoveResponse = ShareTeamChange | ShareMessage | ShareRootChange | ShareTeamRootChange;
+
+/** The response to `share add-link`. */
+export interface ShareLinkCreated {
+  status: "success";
+  vm_name: string;
+  token: string;
+  /** The link to give out. */
+  url: string;
+}
+
+/** `share receive-email <vm>` without on/off: the current settings. */
+export interface ReceiveEmailStatus {
+  vm_name: string;
+  email_enabled: boolean;
+  email_address: string;
+  /** Who the VM may reply to. */
+  reply_policy: "all" | "known" | "owner" | "none";
+}
+
+/** `share receive-email <vm> on|off`. */
+export interface ReceiveEmailChange {
+  status: "success";
+  vm_name: string;
+  email_enabled: boolean;
+  /** Present when enabled. */
+  email_address?: string;
+  /** Who the VM may reply to. */
+  reply_policy: "all" | "known" | "owner" | "none";
+}
+
+/** The response to `share receive-email`. */
+export type ShareReceiveEmailResponse = ReceiveEmailStatus | ReceiveEmailChange;
+
+/** `shelley install` installed Shelley and restarted it. */
+export interface ShelleyInstalled {
+  vm_name: string;
+  status: "installed";
+  /** Where any previous binary was backed up to; reported even if there was none. */
+  backup: string;
+}
+
+/**
+ * `shelley install` did nothing: the VM's image did not opt into Shelley.
+ * Install it by hand from `download_url`.
+ */
+export interface ShelleyNotInstalled {
+  error: "shelley_not_installed";
+  message: string;
+  download_url: string;
+  arch: string;
+}
+
+/** The response to `shelley install`. Check `"error" in result`. */
+export type ShelleyInstallResponse = ShelleyInstalled | ShelleyNotInstalled;
+
 /**
  * Result types by command path. A command method resolves to the type listed
  * here for its path, or to unknown.
  */
 export interface CommandResults {
+  comment: CommentResponse;
   cp: CpResponse;
+  "domain add": DomainAddResponse;
+  "domain rm": DomainRmResponse;
   ls: VMListResponse;
   new: NewResponse;
-  rm: RmResponse;
-  restart: RestartResponse;
+  pause: PauseResponse;
   rename: RenameResponse;
+  resize: ResizeResponse;
+  restart: RestartResponse;
+  resume: ResumeResponse;
+  rm: RmResponse;
+  "share add": ShareAddResponse;
+  "share add-link": ShareLinkCreated;
+  "share port": SharePortResponse;
+  "share receive-email": ShareReceiveEmailResponse;
+  "share remove": ShareRemoveResponse;
+  "share remove-link": ShareMessage;
+  "share set-private": ShareRouteUpdate;
+  "share set-public": ShareRouteUpdate;
+  "share show": ShareShowResponse;
+  "shelley install": ShelleyInstallResponse;
   stat: StatResponse;
+  tag: TagResponse;
   whoami: WhoamiResponse;
 }

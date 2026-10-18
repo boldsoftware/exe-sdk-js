@@ -51,9 +51,13 @@ throws `ExeAPIError` if the VM is not deleted, with `status` 404 if it does not
 exist.
 Options for generated commands retain CLI flag names (for example,
 `{ "no-email": true }`); each method carries the server's help text.
-Methods with known JSON responses reject malformed JSON and are typed (the
-wire types, such as `VMRecord` and `NewResponse`, are exported); other
-account/VM commands may return JSON or text and are typed as `unknown`.
+Every VM command except `grantSupportRoot`, and `whoami`, has a known JSON
+response: its method rejects anything else and resolves to the response's
+type. The wire types (`VMRecord`, `NewResponse`, `ShareShowResponse`, ...) are
+exported. A few report a problem in the result rather than as an error:
+`domainAdd` when DNS does not point at exe.dev yet and `shelleyInstall` when
+Shelley is missing; narrow with `"error" in result`. Other account commands
+may return JSON or text and are typed as `unknown`.
 
 `vm.name` is the current name. `vm.httpsUrl`, `vm.sshDest`, and `vm.tags` expose
 common metadata. `vm.info` is a read-only snapshot with `status`, `region`,

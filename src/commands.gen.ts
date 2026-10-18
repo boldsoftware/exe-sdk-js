@@ -1929,7 +1929,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async pause(options?: CallOptions): Promise<CommandResult<"pause">> {
-    const result = await this.#transport.call("pause", [this.name], options, {}, false);
+    const result = await this.#transport.call("pause", [this.name], options, {}, true);
     return result;
   }
 
@@ -1943,7 +1943,7 @@ export class VM {
   async resume(options?: ReadyOptions): Promise<this> {
     const ready = readiness(options ?? {});
     const { waitUntil, timeoutMs, ...flags } = options ?? {};
-    const result = await this.#transport.call("resume", [this.name], flags, {}, false);
+    const result = await this.#transport.call("resume", [this.name], flags, {}, true);
     if (ready) await this.waitUntilReady(ready);
     return this;
   }
@@ -1980,7 +1980,7 @@ export class VM {
   async tag(tagNames: string | readonly string[], options?: TagOptions): Promise<CommandResult<"tag">> {
     const result = await this.#transport.call("tag", [this.name, tagNames], options, {
       d: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2029,7 +2029,7 @@ export class VM {
       cpu: "number",
       disk: "string",
       memory: "string",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2047,7 +2047,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async comment(text: string, options?: CallOptions): Promise<CommandResult<"comment">> {
-    const result = await this.#transport.call("comment", [this.name, text], options, {}, false);
+    const result = await this.#transport.call("comment", [this.name, text], options, {}, true);
     return result;
   }
 
@@ -2059,7 +2059,7 @@ export class VM {
   async domainAdd(domain: string, options?: DomainAddOptions): Promise<CommandResult<"domain add">> {
     const result = await this.#transport.call("domain add", [this.name, domain], options, {
       wildcard: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2069,7 +2069,7 @@ export class VM {
    * Usage: `domain rm <vm> <domain>`
    */
   async domainRm(domain: string, options?: CallOptions): Promise<CommandResult<"domain rm">> {
-    const result = await this.#transport.call("domain rm", [this.name, domain], options, {}, false);
+    const result = await this.#transport.call("domain rm", [this.name, domain], options, {}, true);
     return result;
   }
 
@@ -2083,7 +2083,7 @@ export class VM {
   async shareShow(options?: ShareShowOptions): Promise<CommandResult<"share show">> {
     const result = await this.#transport.call("share show", [this.name], options, {
       qr: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2100,7 +2100,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async sharePort(port?: string, options?: CallOptions): Promise<CommandResult<"share port">> {
-    const result = await this.#transport.call("share port", [this.name, port], options, {}, false);
+    const result = await this.#transport.call("share port", [this.name, port], options, {}, true);
     return result;
   }
 
@@ -2112,7 +2112,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async shareSetPublic(options?: CallOptions): Promise<CommandResult<"share set-public">> {
-    const result = await this.#transport.call("share set-public", [this.name], options, {}, false);
+    const result = await this.#transport.call("share set-public", [this.name], options, {}, true);
     return result;
   }
 
@@ -2124,7 +2124,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async shareSetPrivate(options?: CallOptions): Promise<CommandResult<"share set-private">> {
-    const result = await this.#transport.call("share set-private", [this.name], options, {}, false);
+    const result = await this.#transport.call("share set-private", [this.name], options, {}, true);
     return result;
   }
 
@@ -2149,7 +2149,7 @@ export class VM {
       message: "string",
       qr: "bool",
       root: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2171,7 +2171,7 @@ export class VM {
   async shareRemove(emailOrTeam: string, options?: ShareRemoveOptions): Promise<CommandResult<"share remove">> {
     const result = await this.#transport.call("share remove", [this.name, emailOrTeam], options, {
       root: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2185,7 +2185,7 @@ export class VM {
   async shareAddLink(options?: ShareAddLinkOptions): Promise<CommandResult<"share add-link">> {
     const result = await this.#transport.call("share add-link", [this.name], options, {
       qr: "bool",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2197,7 +2197,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async shareRemoveLink(token: string, options?: CallOptions): Promise<CommandResult<"share remove-link">> {
-    const result = await this.#transport.call("share remove-link", [this.name, token], options, {}, false);
+    const result = await this.#transport.call("share remove-link", [this.name, token], options, {}, true);
     return result;
   }
 
@@ -2219,7 +2219,7 @@ export class VM {
   async shareReceiveEmail(onOrOff?: "on" | "off", options?: ShareReceiveEmailOptions): Promise<CommandResult<"share receive-email">> {
     const result = await this.#transport.call("share receive-email", [this.name, onOrOff], options, {
       "reply-policy": "string",
-    }, false);
+    }, true);
     return result;
   }
 
@@ -2231,7 +2231,7 @@ export class VM {
    * Tag-scoped API keys may run this command.
    */
   async shelleyInstall(options?: CallOptions): Promise<CommandResult<"shelley install">> {
-    const result = await this.#transport.call("shelley install", [this.name], options, {}, false);
+    const result = await this.#transport.call("shelley install", [this.name], options, {}, true);
     return result;
   }
 
