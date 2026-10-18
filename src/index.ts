@@ -3,11 +3,11 @@
 import { ExedevClient } from "./commands.gen.js";
 import type { ExedevOptions } from "./client.js";
 
-export { ExedevClient, VM, VMReadyError } from "./commands.gen.js";
-export { ExeAPIError, ExeProtocolError, SSHStreamError } from "./client.js";
+export { ExedevClient, VM, VMReadyError, VMSetupError } from "./commands.gen.js";
+export { ExeAPIError, ExeProtocolError, SSHStreamError, quote } from "./client.js";
 export type { ExedevOptions, SSHOptions, SSHResult } from "./client.js";
 export type * from "./commands.gen.js";
-export type { WhoamiResponse, WhoamiSSHKey, StatResponse, StatPoint, RmResponse } from "./types.js";
+export type * from "./types.js";
 
 export function exedev(options: ExedevOptions): ExedevClient { return new ExedevClient(options); }
 export default exedev;

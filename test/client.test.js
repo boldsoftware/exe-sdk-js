@@ -15,6 +15,7 @@ beforeEach(() => {
     if (command.startsWith("ls")) return new Response('{"vms":[]}');
     if (command.startsWith("cp")) return new Response('{"name":"copy","ssh":"copy.exe.xyz","state":"starting"}');
     if (command.startsWith("rename")) return new Response('{"old_name":"old","new_name":"new"}');
+    if (command.startsWith("rm ")) return new Response(JSON.stringify({ deleted: [command.slice(3)], failed: [] }));
     if (command.startsWith("ssh ")) return ndjson([{ exit_code: 0 }]);
     return new Response("{}");
   };
@@ -116,35 +117,78 @@ test("quote", () => {
   assert.equal(quote("it's"), `'it'"'"'s'`);
 });
 
-test("failures throw ExeAPIError without exposing command arguments", async () => {
-  respond = () => new Response('{"error":"nope"}', { status: 422 });
-  await assert.rejects(exe().new({ name: "my-vm" }), (err) => {
+test("failures throw ExeAPIError with the server's reason, not the request", async () => {
+  respond = () => new Response('{"error":"VM name is taken"}', { status: 422 });
+  await assert.rejects(exe().new({ name: "my-vm", env: "TOKEN=secret-value" }), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.status, 422);
     assert.equal(err.operation, "new");
-    assert.equal(err.message, "exe.dev API error (422) during new");
+    assert.equal(err.message, "exe.dev API error (422) during new: VM name is taken");
     return true;
   });
 });
 
+test("the server's reason is one line of at most 200 characters", async () => {
+  respond = () => new Response(JSON.stringify({ error: `multi\n  line ${"x".repeat(300)}` }), { status: 422 });
+  await assert.rejects(exe().vm("my-vm").pause(), (err) => {
+    const reason = err.message.slice("exe.dev API error (422) during pause: ".length);
+    assert.match(reason, /^multi line x+…$/);
+    assert.equal(reason.length, 200);
+    return true;
+  });
+  respond = () => new Response("<html>bad gateway</html>", { status: 502 });
+  await assert.rejects(exe().vm("my-vm").pause(), { message: "exe.dev API error (502) during pause" });
+});
+
 test("an error document throws despite a 200", async () => {
-  // What exe.dev returns for rm of a VM that does not exist.
-  respond = () =>
-    new Response(
-      '{"error":"VM \\"my-vm\\" not found"}\n{"deleted":[],"failed":["my-vm"]}\n',
-      { status: 200 },
-    );
+  respond = () => new Response('{"error":"no such thing"}\n{"ok":true}\n', { status: 200 });
+  await assert.rejects(exe().vm("my-vm").pause(), {
+    name: "ExeAPIError", status: 200, message: "exe.dev API error (200) during pause: no such thing",
+  });
+});
+
+test("vm.rm of a missing VM is a 404 with the server's reason", async () => {
+  // exe.dev reports per-VM failures in band, beside a summary, with a 200.
+  respond = () => new Response(
+    '{"error":"VM \\"my-vm\\" not found"}\n' +
+    '{"deleted":[],"failed":["my-vm"],"not_found":["my-vm"],"errors":{"my-vm":"VM \\"my-vm\\" not found"}}\n');
   await assert.rejects(exe().vm("my-vm").rm(), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.operation, "rm");
-    assert.match(err.details().body, /not found/);
+    assert.equal(err.status, 404);
+    assert.equal(err.message, 'exe.dev API error (404) during rm: VM "my-vm" not found');
     return true;
   });
+  // Any other failure, or a server without not_found, is a failed command.
+  respond = () => new Response(
+    '{"error":"VM \\"my-vm\\" is locked: \\"billing\\""}\n{"deleted":[],"failed":["my-vm"]}\n');
+  await assert.rejects(exe().vm("my-vm").rm(), { status: 422, message: /during rm: VM "my-vm" is locked/ });
+  respond = () => new Response('{"deleted":["my-vm"],"failed":[]}');
+  assert.deepEqual(await exe().vm("my-vm").rm(), { deleted: ["my-vm"], failed: [] });
+  respond = () => new Response('{"deleted":"my-vm"}');
+  await assert.rejects(exe().vm("my-vm").rm(), { name: "ExeProtocolError" });
+});
+
+test("exe.rm deletes many VMs in one request and reports each outcome", async () => {
+  const c = exe();
+  respond = () => new Response(
+    '{"error":"VM \\"gone\\" not found"}\n' +
+    '{"deleted":["a","b"],"failed":["gone"],"not_found":["gone"],"errors":{"gone":"VM \\"gone\\" not found"}}\n');
+  const result = await c.rm(["a", c.vm("b"), "gone", "a"]);
+  assert.deepEqual(result, { deleted: ["a", "b"], failed: ["gone"], not_found: ["gone"], errors: { gone: 'VM "gone" not found' } });
+  assert.deepEqual(sent(), ["rm a b gone"]);
+  assert.deepEqual(await c.rm([]), { deleted: [], failed: [], not_found: [], errors: {} });
+  assert.equal(sent().length, 1, "nothing to delete needs no request");
+  await assert.rejects(c.rm(["a; reboot"]), TypeError);
+  await assert.rejects(c.rm("abc"), TypeError, "a string is not a list of VMs a, b, and c");
+  assert.equal(sent().length, 1);
+  respond = () => new Response('{"error":"command not allowed by token permissions"}', { status: 403 });
+  await assert.rejects(c.rm(["a"]), { name: "ExeAPIError", status: 403 });
 });
 
 test("a result with an error field alongside others is not a failure", async () => {
   respond = () => new Response('{"vm_name":"my-vm","ssh_dest":"my-vm.exe.xyz","https_url":"https://my-vm.exe.xyz","error":"shelley setup failed"}');
-  assert.equal((await exe().new({ waitUntil: "created" })).info.setupError, "shelley setup failed");
+  assert.equal((await exe().new({ waitUntil: "created" })).info.promptError, "shelley setup failed");
 });
 
 test("non-JSON output is returned as text", async () => {
@@ -210,7 +254,7 @@ test("ssh reads frames split across chunks", async () => {
 
 test("ssh rejects output that ends before the exit code", async () => {
   respond = () => ndjson([{ stdout: b64("partial") }]);
-  await assert.rejects(exe().vm("my-vm").ssh("cat big"), /before the command exited/);
+  await assert.rejects(exe().vm("my-vm").ssh("cat big"), /before the command's exit status arrived/);
 });
 
 test("ssh rejects with the error that ends a stream in place of the exit code", async () => {
@@ -320,7 +364,7 @@ test("ssh rejects a stream that breaks off", async () => {
       { headers: { "Content-Type": "application/x-ndjson" } },
     );
   await assert.rejects(exe().vm("my-vm").ssh("cat big"), (err) => {
-    assert.match(err.message, /before the command exited/);
+    assert.match(err.message, /before the command's exit status arrived/);
     assert.equal(err.name, "SSHStreamError");
     assert.equal(err.code, "interrupted");
     return true;

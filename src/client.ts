@@ -22,6 +22,7 @@ export interface SSHOptions extends CallOptions {
 }
 
 export interface SSHResult {
+  /** The command's exit status; 128+N if it was killed by signal N, as in a shell. */
   readonly exitCode: number;
   readonly captured: boolean;
   readonly stdout: string;
@@ -30,13 +31,18 @@ export interface SSHResult {
   readonly stderrBytes: Uint8Array;
 }
 
-/** API rejection. Neither requests nor response bodies appear in default logging. */
+/**
+ * API rejection. The message carries the server's error text, shortened; the
+ * request and the full response body stay out of it.
+ */
 export class ExeAPIError extends Error {
   readonly operation: string;
+  /** The HTTP status, or 404 for a VM the server reported missing. */
   readonly status: number;
   readonly #body: string;
   constructor(operation: string, status: number, body: string) {
-    super(`exe.dev API error (${status}) during ${operation}`);
+    const reason = errorText(body);
+    super(`exe.dev API error (${status}) during ${operation}${reason ? `: ${reason}` : ""}`);
     this.name = "ExeAPIError";
     this.operation = operation;
     this.status = status;
@@ -58,25 +64,28 @@ export class SSHStreamError extends Error {
   readonly #stdout: Uint8Array;
   readonly #stderr: Uint8Array;
   readonly #detail?: string;
+  readonly #cause?: unknown;
   constructor(
     readonly code: "interrupted" | "protocol" | "output_limit",
     readonly captured: boolean,
     stdout: Uint8Array,
     stderr: Uint8Array,
     detail?: string,
+    cause?: unknown,
   ) {
-    super(`exedev: ssh ${code === "output_limit" ? "capture limit exceeded" : code === "protocol" ? "invalid output stream" : "output ended before the command exited"}`);
+    super(`exedev: ssh ${code === "output_limit" ? "capture limit exceeded" : code === "protocol" ? "invalid output stream" : "connection ended before the command's exit status arrived"}`);
     this.name = "SSHStreamError";
     this.#stdout = stdout;
     this.#stderr = stderr;
     this.#detail = detail;
+    this.#cause = cause;
   }
   get stdoutBytes(): Uint8Array { return this.#stdout; }
   get stderrBytes(): Uint8Array { return this.#stderr; }
   get stdout(): string { return decodeUTF8(this.#stdout); }
   get stderr(): string { return decodeUTF8(this.#stderr); }
-  /** Opt-in server diagnostics; may contain secrets. */
-  details(): { message?: string } { return { message: this.#detail }; }
+  /** Opt-in diagnostics: the server's message, or the transport's error. Either may contain secrets. */
+  details(): { message?: string; cause?: unknown } { return { message: this.#detail, cause: this.#cause }; }
 }
 
 /** Internal transport, deliberately not exported from the package entry point. */
@@ -128,23 +137,37 @@ export class Transport {
     path: string, args: readonly Arg[], options: CallOptions | undefined,
     flags: Readonly<Record<string, FlagKind>>, json = false,
   ): Promise<any> {
-    const res = await this.#post(commandLine(path, args, options, flags), options);
-    const body = await this.#text(res, options?.signal);
-    if (!res.ok) throw new ExeAPIError(path, res.status, body);
-    const docs = parseDocuments(body);
+    const { status, body, docs } = await this.documents(path, args, options, flags);
     if (docs === undefined) {
       if (json) throw new ExeProtocolError(path);
       return body;
     }
-    if (docs.some(isErrorDocument)) throw new ExeAPIError(path, res.status, body);
+    if (docs.some(isErrorDocument)) throw new ExeAPIError(path, status, body);
     return docs.length === 1 ? docs[0] : docs;
+  }
+  /** A successful response's JSON documents, including any in-band error documents. */
+  async documents(
+    path: string, args: readonly Arg[], options: CallOptions | undefined,
+    flags: Readonly<Record<string, FlagKind>>,
+  ): Promise<{ status: number; body: string; docs: unknown[] | undefined }> {
+    const res = await this.#post(commandLine(path, args, options, flags), options);
+    const body = await this.#text(res, options?.signal);
+    if (!res.ok) throw new ExeAPIError(path, res.status, body);
+    return { status: res.status, body, docs: parseDocuments(body) };
   }
   async ssh(vm: string, command: string, options: SSHOptions = {}): Promise<SSHResult> {
     const { capture = true, maxOutputBytes = 8 * 1024 * 1024 } = options;
     if (typeof capture !== "boolean" || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0) {
       throw new TypeError("exedev: capture must be boolean and maxOutputBytes a nonnegative safe integer");
     }
-    const res = await this.#post(`ssh ${quote(vm)} ${quote(command)}`, options);
+    let res: Response;
+    try {
+      res = await this.#post(`ssh ${quote(vm)} ${quote(command)}`, options);
+    } catch (err) {
+      options.signal?.throwIfAborted();
+      // The request may have reached the VM: whether the command ran is unknown.
+      throw new SSHStreamError("interrupted", capture, new Uint8Array(), new Uint8Array(), undefined, err);
+    }
     if (!res.ok) {
       const body = await this.#text(res, options.signal);
       throw new ExeAPIError("ssh", res.status, body);
@@ -192,6 +215,10 @@ export function commandLine(
   return words.join(" ");
 }
 
+/**
+ * Quote a string as one POSIX shell word, for untrusted values interpolated
+ * into vm.ssh() commands: vm.ssh(`cat ${quote(path)}`).
+ */
 export function quote(s: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'"'"'`)}'`;
 }
@@ -214,8 +241,8 @@ async function readSSHOutput(
   let count = 0;
   let exitCode: number | undefined;
   let terminal = false;
-  const failure = (code: SSHStreamError["code"], detail?: string) =>
-    new SSHStreamError(code, capture, concat(chunks.stdout), concat(chunks.stderr), detail);
+  const failure = (code: SSHStreamError["code"], detail?: string, cause?: unknown) =>
+    new SSHStreamError(code, capture, concat(chunks.stdout), concat(chunks.stderr), detail, cause);
   const deliver = async (name: StreamName, text: string) => {
     if (text && callbacks[name]) await abortable(Promise.resolve().then(() => callbacks[name]!(text)), signal);
     signal?.throwIfAborted();
@@ -259,9 +286,9 @@ async function readSSHOutput(
       signal?.throwIfAborted();
       let chunk: ReadableStreamReadResult<Uint8Array>;
       try { chunk = await abortable(reader.read(), signal); }
-      catch {
+      catch (err) {
         signal?.throwIfAborted();
-        throw failure("interrupted");
+        throw failure("interrupted", undefined, err);
       }
       if (chunk.done) break;
       const lines = (pending + decoder.decode(chunk.value, { stream: true })).split("\n");
@@ -335,6 +362,15 @@ function parseDocuments(body: string): unknown[] | undefined {
   try { return text.split("\n").filter((s) => s.trim() !== "").map((s) => JSON.parse(s)); }
   catch { return undefined; }
 }
-function isErrorDocument(doc: unknown): boolean {
+/** The server's first error text, on one line and at most 200 characters. */
+function errorText(body: string): string | undefined {
+  const docs = parseDocuments(body) ?? [];
+  const hasError = (doc: unknown) => typeof (doc as { error?: unknown } | null)?.error === "string";
+  const doc = (docs.find(isErrorDocument) ?? docs.find(hasError)) as { error: unknown } | undefined;
+  if (typeof doc?.error !== "string") return undefined;
+  const text = doc.error.replace(/\s+/g, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text || undefined;
+}
+export function isErrorDocument(doc: unknown): boolean {
   return typeof doc === "object" && doc !== null && !Array.isArray(doc) && Object.keys(doc).length === 1 && "error" in doc;
 }

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import exedev, { VM, VMReadyError, ExeAPIError } from "../dist/index.js";
+import { inspect } from "node:util";
+import exedev, { VM, VMReadyError, VMSetupError, ExeAPIError, SSHStreamError, quote } from "../dist/index.js";
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status });
 const info = (name = "worker") => ({
@@ -137,9 +138,11 @@ test("restart and resume also wait by default, with an opt-out", async () => {
 
 test("VM operations and raw transport are not a parallel client API", () => {
   const { exe } = fixture(() => json({}));
-  for (const name of ["ssh", "cp", "rm", "pause", "resume", "restart", "rename", "resize", "stat", "shareShow", "exec", "run"]) {
+  for (const name of ["ssh", "cp", "pause", "resume", "restart", "rename", "resize", "stat", "shareShow", "exec", "run"]) {
     assert.equal(exe[name], undefined, name);
   }
+  // The exception: exe.rm takes a list, to delete many VMs in one request.
+  assert.equal(typeof exe.rm, "function");
   assert.equal(typeof exe.whoami, "function");
   assert.equal(exe.vm("worker").exec, undefined);
 });
@@ -152,6 +155,7 @@ test("readiness permission errors fail fast and preserve the created VM for clea
     assert.equal(err.vm.name, "worker");
     assert.ok(err.cause instanceof ExeAPIError);
     assert.equal(err.cause.status, 403);
+    assert.match(err.message, /worker .*may not run ssh.*waitUntil: "created"/);
     return true;
   });
   assert.deepEqual(commands, ["new", "ssh worker true"]);
@@ -196,4 +200,110 @@ test("VM metadata contracts fail explicitly on incompatible server JSON", async 
     await assert.rejects(fixture(() => json(row)).exe.new({ waitUntil: "created" }), { name: "ExeProtocolError" });
   }
   await assert.rejects(fixture(() => json({ vms: [{}] })).exe.ls(), { name: "ExeProtocolError" });
+});
+
+const stdout = (text, code = 0) => new Response(
+  `${JSON.stringify({ stdout: Buffer.from(text).toString("base64") })}\n{"exit_code":${code}}\n`,
+  { headers: { "Content-Type": "application/x-ndjson" } });
+// systemctl show output for exe-setup.service, as observed on exeuntu.
+const unitText = (props, system = "running") => Object.entries({
+  LoadState: "loaded", ActiveState: "inactive", Result: "success", ExecMainCode: "0", ExecMainStatus: "0",
+  ExecMainExitTimestampMonotonic: "0", ConditionResult: "no", ConditionTimestampMonotonic: "0", ...props,
+}).map(([k, v]) => `${k}=${v}`).join("\n") + `\nSystemState=${system}\n`;
+const unit = (props, system) => stdout(unitText(props, system));
+
+test("waitUntil setup polls the setup unit until its script has run", async (t) => {
+  const time = clock(t);
+  const states = [
+    stdout("State=booting\n"),
+    unit({ ActiveState: "inactive", Job: "90" }, "starting"),
+    unit({ ActiveState: "activating" }, "starting"),
+    unit({ ExecMainCode: "1", ExecMainExitTimestampMonotonic: "123", ConditionResult: "yes", ConditionTimestampMonotonic: "5" }),
+  ];
+  const { exe, commands } = fixture((command) => command.startsWith("new") ? json(info()) : states.shift());
+  const created = exe.new({ waitUntil: "setup" });
+  for (let i = 0; i < 3; i++) await time.fire(1000 * 2 ** i > 2000 ? 2000 : 1000 * 2 ** i);
+  const vm = await created;
+  assert.equal(vm.name, "worker");
+  assert.equal(commands.length, 5);
+  assert.match(commands[1], /^ssh worker '.*systemctl show exe-setup.service/s);
+  assert.ok(commands.slice(1).every((c) => c === commands[1]), "the probe never changes");
+  assert.equal(time.timers.size, 0);
+});
+
+test("waitUntil setup has nothing to wait for without a script or a setup unit", async () => {
+  for (const output of [
+    unit({ ConditionTimestampMonotonic: "5", ConditionResult: "no" }),
+    unit({ LoadState: "not-found" }),
+    stdout("State=unsupported\n"),
+    unit({}, "degraded"), // Never started, and the system finished booting.
+  ]) {
+    const { exe } = fixture(() => output);
+    await exe.vm("worker").waitUntilReady({ waitUntil: "setup" });
+  }
+});
+
+test("a failed setup script rejects with its result and opt-in output", async () => {
+  const failed = unitText({ ActiveState: "failed", Result: "exit-code", ExecMainCode: "1", ExecMainStatus: "7", ExecMainExitTimestampMonotonic: "9" }, "degraded");
+  const { exe } = fixture((command) => command.startsWith("new") ? json(info()) :
+    stdout(`${failed}---\nsecret-token=abc\nboom\n`));
+  await assert.rejects(exe.new({ waitUntil: "setup" }), (err) => {
+    assert.ok(err instanceof VMReadyError);
+    assert.equal(err.vm.name, "worker");
+    assert.equal(err.message, "exedev: VM worker setup script failed (exit code 7)");
+    assert.ok(err.cause instanceof VMSetupError);
+    assert.equal(err.cause.result, "exit-code");
+    assert.equal(err.cause.exitCode, 7);
+    assert.equal(err.cause.signal, undefined);
+    assert.match(err.cause.details().output, /boom/);
+    assert.doesNotMatch(inspect(err), /secret-token/);
+    return true;
+  });
+  const killed = fixture(() => unit({ ActiveState: "failed", Result: "signal", ExecMainCode: "2", ExecMainStatus: "9" }));
+  await assert.rejects(killed.exe.vm("worker").waitUntilReady({ waitUntil: "setup" }), (err) =>
+    err.cause.signal === 9 && err.cause.exitCode === undefined && /\(signal 9\)/.test(err.message));
+});
+
+test("waitUntil setup defaults to a ten-minute deadline", async (t) => {
+  const time = clock(t);
+  const { exe } = fixture(() => new Promise(() => {}));
+  const rejected = assert.rejects(exe.vm("worker").waitUntilReady({ waitUntil: "setup" }), (err) =>
+    err instanceof VMReadyError && err.cause.name === "TimeoutError" && /setup did not finish in time/.test(err.message));
+  await time.fire(600_000);
+  await rejected;
+  await assert.rejects(exe.vm("worker").waitUntilReady({ waitUntil: "created" }), TypeError);
+});
+
+test("readiness probes retry a lost connection; it is safe to rerun them", async (t) => {
+  const time = clock(t);
+  let calls = 0;
+  const { exe } = fixture(() => {
+    if (++calls === 1) throw new TypeError("fetch failed", { cause: { code: "UND_ERR_HEADERS_TIMEOUT" } });
+    return exited();
+  });
+  const ready = exe.vm("worker").waitUntilReady();
+  await time.fire(100);
+  await ready;
+  assert.equal(calls, 2);
+});
+
+test("ssh reports a failed request as an interrupted command, keeping the cause opt-in", async () => {
+  const { exe } = fixture(() => { throw new TypeError("fetch failed: sensitive-command"); });
+  await assert.rejects(exe.vm("worker").ssh("sleep 310"), (err) => {
+    assert.ok(err instanceof SSHStreamError);
+    assert.equal(err.code, "interrupted");
+    assert.equal(err.details().cause.message, "fetch failed: sensitive-command");
+    assert.doesNotMatch(inspect(err), /sensitive-command/);
+    return true;
+  });
+  // A caller's cancellation is still the caller's reason.
+  const abort = new AbortController();
+  const reason = new Error("stop");
+  const cancelled = fixture(() => { abort.abort(reason); throw new DOMException("aborted", "AbortError"); });
+  await assert.rejects(cancelled.exe.vm("worker").ssh("true", { signal: abort.signal }), (err) => err === reason);
+});
+
+test("quote is exported for interpolating values into ssh commands", () => {
+  assert.equal(quote("plain-word"), "plain-word");
+  assert.equal(quote("it's $HOME"), `'it'"'"'s $HOME'`);
 });

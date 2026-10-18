@@ -109,7 +109,12 @@ export interface CpResponse {
 /** The response to `rm`. */
 export interface RmResponse {
   deleted: string[];
+  /** Includes not_found. */
   failed: string[];
+  /** Missing, or not visible to this token. Absent from older servers. */
+  not_found?: string[];
+  /** Why each failed VM was not deleted. Absent from older servers. */
+  errors?: Record<string, string>;
 }
 
 /** The response to `restart`. */

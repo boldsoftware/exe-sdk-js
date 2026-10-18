@@ -79,14 +79,15 @@ test("interrupted streams expose partial output without exposing the command", a
   });
 });
 
-test("API errors keep sensitive response diagnostics opt-in", async () => {
-  const c = client(async () => new Response('{"error":"rejected very-sensitive-command"}', { status: 422 }));
+test("API errors carry the server's reason but keep the request and the full body opt-in", async () => {
+  const c = client(async () => new Response('{"error":"VM is not running","trace":"very-sensitive-trace"}\n', { status: 422 }));
   await assert.rejects(ssh(c, "echo very-sensitive-command"), (err) => {
     assert.equal(err.name, "ExeAPIError");
     assert.equal(err.operation, "ssh");
-    assert.doesNotMatch(inspect(err), /very-sensitive-command|secret-token/);
-    assert.doesNotMatch(JSON.stringify(err), /very-sensitive-command|secret-token/);
-    assert.match(err.details().body, /very-sensitive-command/);
+    assert.match(err.message, /: VM is not running$/);
+    assert.doesNotMatch(inspect(err), /very-sensitive-command|very-sensitive-trace|secret-token/);
+    assert.doesNotMatch(JSON.stringify(err), /very-sensitive-command|very-sensitive-trace|secret-token/);
+    assert.match(err.details().body, /very-sensitive-trace/);
     return true;
   });
 });

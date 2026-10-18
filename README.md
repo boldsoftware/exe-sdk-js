@@ -36,6 +36,9 @@ of `exedev`, `ExedevClient`, and `VM` are also available.
 - `vm.refresh(options?)` refreshes its metadata and returns the same object.
 - `vm.ssh(command, options?)` runs a shell command on that VM.
 - `vm.cp({ name?, ...options })` copies it and returns a new `VM` object.
+- `exe.rm(vms)` deletes an array of VMs or names in one request; the server
+  deletes several at a time. It resolves to `{ deleted, failed, not_found,
+  errors }` rather than throwing for VMs it could not delete.
 - Lifecycle and VM-scoped commands are methods on the VM: `vm.rm()`,
   `vm.pause()`, `vm.resume()`, `vm.restart()`, `vm.rename(newName)`,
   `vm.resize(options)`, `vm.stat(options)`, `vm.tag(tags)`, `vm.comment(text)`,
@@ -43,15 +46,19 @@ of `exedev`, `ExedevClient`, and `VM` are also available.
 - Account commands remain on the client: `exe.whoami()`, `exe.sshKeyList()`,
   `exe.integrationsList()`, `exe.billingPlan()`, etc.
 
-There is no parallel raw-command API or client-level `ssh`, `cp`, or `rm`.
+There is no parallel raw-command API or client-level `ssh` or `cp`. `vm.rm()`
+throws `ExeAPIError` if the VM is not deleted, with `status` 404 if it does not
+exist.
 Options for generated commands retain CLI flag names (for example,
 `{ "no-email": true }`); each method carries the server's help text.
-Methods with known JSON responses reject malformed JSON; other account/VM
-commands may return JSON or text and are typed as `unknown`.
+Methods with known JSON responses reject malformed JSON and are typed (the
+wire types, such as `VMRecord` and `NewResponse`, are exported); other
+account/VM commands may return JSON or text and are typed as `unknown`.
 
 `vm.name` is the current name. `vm.httpsUrl`, `vm.sshDest`, and `vm.tags` expose
 common metadata. `vm.info` is a read-only snapshot with `status`, `region`,
-`comment`, `createdAt`, and `setupError` when available. A reference from
+`comment`, `createdAt`, and `promptError` (why `new`'s `prompt` did not reach
+Shelley) when available. A reference from
 `exe.vm(name)` initially knows only its name. Copies do not invent a web URL;
 call `refresh()` to fetch it. A successful `rename()` updates the same object
 and invalidates old destinations; other references do not automatically change.
@@ -60,16 +67,30 @@ and invalidates old destinations; other references do not automatically change.
 
 `new`, `cp`, `restart`, and `resume` wait for SSH by default. Pass
 `{ waitUntil: "created" }` to return without probing, including when the token
-has no `ssh` permission. `vm.waitUntilReady({ timeoutMs?, signal? })` explicitly
-waits later. The default readiness deadline is 60 seconds **after** creation or
-the lifecycle operation returns, including probe requests and backoff.
+has no `ssh` permission. `vm.waitUntilReady({ waitUntil?, timeoutMs?, signal? })`
+explicitly waits later. The default readiness deadline is 60 seconds **after**
+creation or the lifecycle operation returns, including probe requests and backoff.
 
 Readiness runs only the harmless command `true`, retrying transient connection
-failures. It does not wait for application servers or setup scripts, and it
-never retries a user command or the creation request.
+failures. It never retries a user command or the creation request, and it does
+not wait for application servers.
+
+`{ waitUntil: "setup" }` also waits for the VM's setup script (`new`'s
+`"setup-script"`, run by exeuntu's `exe-setup.service`) to finish, polling the
+unit over SSH with a default deadline of 10 minutes. If the script failed, the
+`VMReadyError`'s `cause` is a `VMSetupError` with `exitCode` (or `signal`) and
+systemd's `result`; `details().output` has the end of its journal. Images
+without that unit, such as `ubuntu:24.04`, do not run setup scripts, so there
+is nothing to wait for.
+
+```ts
+const vm = await exe.new({ "setup-script": "#!/bin/sh\nsudo apt-get install -y jq", waitUntil: "setup" });
+```
 
 If waiting fails, `VMReadyError.vm` gives you the VM for inspection or cleanup;
-it is not automatically deleted. All operations accept an `AbortSignal`.
+it is not automatically deleted. That includes a token without `ssh`
+permission: the probe is refused, and the error says to use
+`waitUntil: "created"`. All operations accept an `AbortSignal`.
 Caller cancellation preserves `signal.reason`, including during streaming and
 callbacks, rather than wrapping it in another error. An aborted creation may
 still have created a VM; use an explicit name or `ls()` to recover it.
@@ -77,9 +98,19 @@ still have created a VM; use an explicit name or `ls()` to recover it.
 ## Running commands
 
 `vm.ssh()` resolves to `{ exitCode, stdout, stderr, stdoutBytes, stderrBytes,
-captured }`. A nonzero exit code is a result, not an exception. Byte arrays
-preserve binary output; strings are decoded as UTF-8. The command is a shell
-script: quote any untrusted values you interpolate into it.
+captured }`. A nonzero exit code is a result, not an exception; a command killed
+by signal N exits 128+N, as in a shell. Byte arrays preserve binary output;
+strings are decoded as UTF-8. The command is a shell script: quote any untrusted
+values you interpolate into it with `quote`.
+
+```ts
+import { quote } from "@exedev/sdk";
+await vm.ssh(`cat ${quote(path)}`);
+```
+
+Commands run in a non-login shell. Variables from `new`'s `env` are set for
+them (once the VM's exe-init has the update that does so; until then use
+`bash -lc`). Long silent commands are fine: the server keeps the response alive.
 
 ```ts
 await vm.ssh("make", {
@@ -102,15 +133,21 @@ is ignored in this mode. Invalid or oversized NDJSON frames are always rejected.
 
 ## Errors
 
-- `ExeAPIError`: `operation` and HTTP `status`. The message, stack, and ordinary
-  serialization omit request arguments and server response bodies. Explicitly
-  call `error.details().body` for diagnostics; this may contain secrets.
+- `ExeAPIError`: `operation` and HTTP `status`. The message includes the
+  server's error text, on one line and shortened to 200 characters, for example
+  `exe.dev API error (422) during ssh: VM "web" is not running`. It never
+  includes the request, but the server's text can mention values you sent.
+  `error.details().body` has the full response; this may contain secrets.
 - `ExeProtocolError`: an incompatible response, including malformed JSON or a
   server that does not support NDJSON SSH output.
 - `SSHStreamError`: interrupted/invalid output or a capture limit. `code` is
   `interrupted`, `protocol`, or `output_limit`; getters provide captured partial
-  output. The exit status is unknown. `details()` exposes opt-in server diagnostics.
+  output. The exit status is unknown. A request that fails before a response
+  (for example, a network error) is `interrupted` too, since the command may
+  have started. `details()` exposes opt-in diagnostics: the server's message or
+  the transport's error.
 - `VMReadyError`: readiness failed; `vm` and `cause` are available.
+- `VMSetupError`: the setup script failed; the `cause` of a `VMReadyError`.
 
 Errors do not establish that an operation never ran. Do not blindly retry a
 mutation or remote command after a transport failure.

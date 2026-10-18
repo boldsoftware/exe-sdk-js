@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import exedev, { VM, VMReadyError, ExeAPIError, SSHStreamError } from "../dist/index.js";
+import exedev, { VM, VMReadyError, VMSetupError, ExeAPIError, SSHStreamError } from "../dist/index.js";
 
 const tokenFile = process.env.EXE_TOKEN_FILE || join(homedir(), ".config", "exedev", "sdk-test-token");
 const tag = process.env.EXE_TEST_TAG || "sdk-test";
@@ -28,14 +28,13 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
   const renamed = `${name}-r`;
   const copyName = `${name}-c`;
   const missing = `${name}-missing`;
+  const setupName = `${name}-s`;
   let vm;
   t.after(async () => {
-    for (const cleanupName of new Set([copyName, renamed, vm?.name, name].filter(Boolean))) {
-      try { await exe.vm(cleanupName).rm({ signal: AbortSignal.timeout(30_000) }); }
-      catch (err) {
-        if (!(err instanceof ExeAPIError) || !/not found/.test(err.details().body)) throw err;
-      }
-    }
+    const names = [copyName, renamed, setupName, vm?.name, name].filter(Boolean);
+    const { failed, errors } = await exe.rm(names, { signal: AbortSignal.timeout(30_000) });
+    const leaked = failed.filter((n) => !/not found/.test(errors?.[n] ?? "not found"));
+    assert.deepEqual(leaked, [], `cleanup failed: ${JSON.stringify(errors)}`);
   });
   await t.test("whoami", async () => {
     const me = await exe.whoami();
@@ -96,7 +95,8 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     assert.ok(copy instanceof VM);
     assert.equal(copy.name, copyName);
     if (!skipSSH) assert.equal((await copy.ssh("printf copy-ready")).stdout, "copy-ready");
-    assert.deepEqual(await copy.rm(), { deleted: [copyName], failed: [] });
+    const { deleted, failed } = await copy.rm();
+    assert.deepEqual({ deleted, failed }, { deleted: [copyName], failed: [] });
   });
   await t.test("stat and VM-bound sharing", async () => {
     const st = await vm.stat();
@@ -119,10 +119,28 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     assert.equal((await vm.refresh()).name, renamed);
     assert.deepEqual((await exe.ls(renamed)).map((v) => v.name), [renamed]);
   });
+  await t.test("a failed setup script is reported with its exit code and output", { skip: skipSSH }, async () => {
+    await assert.rejects(exe.new({
+      name: setupName, waitUntil: "setup", signal: t.signal,
+      "setup-script": "#!/bin/sh\necho setup-output-marker\nexit 3",
+    }), (err) => {
+      assert.ok(err instanceof VMReadyError, String(err));
+      assert.equal(err.vm.name, setupName);
+      assert.ok(err.cause instanceof VMSetupError, String(err.cause));
+      assert.equal(err.cause.exitCode, 3);
+      assert.match(err.cause.details().output, /setup-output-marker/);
+      return true;
+    });
+  });
   await t.test("rm and errors", async () => {
-    assert.deepEqual(await vm.rm(), { deleted: [renamed], failed: [] });
+    const { deleted, failed } = await vm.rm();
+    assert.deepEqual({ deleted, failed }, { deleted: [renamed], failed: [] });
     assert.ok(!(await exe.ls()).some((v) => v.name === renamed));
-    await assert.rejects(exe.vm(missing).rm(), ExeAPIError);
+    // 404 once the server reports not_found; a failed command (422) before.
+    await assert.rejects(exe.vm(missing).rm(), (err) => err instanceof ExeAPIError &&
+      [404, 422].includes(err.status) && err.message.endsWith(`during rm: VM "${missing}" not found`));
     await assert.rejects(exe.vm(missing).restart(), (err) => err instanceof ExeAPIError && err.status === 422);
+    const bulk = await exe.rm([missing]);
+    assert.deepEqual({ deleted: bulk.deleted, failed: bulk.failed }, { deleted: [], failed: [missing] });
   });
 });
