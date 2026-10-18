@@ -99,8 +99,8 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
       }
     }
     assert.equal(res.exitCode, 7);
-    assert.match(res.text(), /to-stdout/);
-    assert.match(res.text(), /to-stderr/);
+    assert.equal(res.stdout, "to-stdout\n");
+    assert.equal(res.stderr, "to-stderr\n");
   });
 
   await t.test("cp", async () => {

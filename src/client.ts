@@ -16,7 +16,7 @@ export type ExecOptions = CallOptions;
 export interface ExecResult {
   /** HTTP status code. */
   status: number;
-  /** Raw response body; for ssh, the command's output. */
+  /** Raw response body; for ssh, the command's stdout and stderr, combined. */
   body: string;
   /** Whether the command succeeded: a 2xx status and, for ssh, exit code 0. */
   ok: boolean;
@@ -27,11 +27,15 @@ export interface ExecResult {
 /** The result of {@link ExedevClient.ssh}. */
 export interface SSHResult {
   /** The remote command's exit code. */
-  exitCode: number;
-  /** The command's stdout and stderr, combined, as the VM wrote them. */
-  output: Uint8Array;
-  /** Returns output decoded as UTF-8. */
-  text(): string;
+  readonly exitCode: number;
+  /** The command's standard output, decoded as UTF-8. */
+  readonly stdout: string;
+  /** The command's standard error, decoded as UTF-8. */
+  readonly stderr: string;
+  /** The command's standard output as the VM wrote it, byte for byte. */
+  readonly stdoutBytes: Uint8Array;
+  /** The command's standard error as the VM wrote it, byte for byte. */
+  readonly stderrBytes: Uint8Array;
 }
 
 /**
@@ -60,8 +64,8 @@ export class ExedevClient extends Commands {
   async exec(command: string, options?: CallOptions): Promise<ExecResult> {
     const res = await this.#post(command, options);
     if (isNDJSON(res)) {
-      const { output, exitCode } = await readSSHOutput(command, res);
-      return { status: res.status, body: decodeUTF8(output), ok: res.ok && exitCode === 0, exitCode };
+      const { combined, exitCode } = await readSSHOutput(command, res);
+      return { status: res.status, body: decodeUTF8(combined), ok: res.ok && exitCode === 0, exitCode };
     }
     const body = await res.text();
     return { status: res.status, body, ok: res.ok };
@@ -70,8 +74,9 @@ export class ExedevClient extends Commands {
   /**
    * Runs a shell command on a VM, like `ssh <vm> <command>`, and resolves
    * when it exits. A nonzero exit code is a result, not an error; ExeAPIError
-   * means the command never ran (no such VM, not permitted, ...). The API
-   * token must allow the ssh command.
+   * means the command never ran (no such VM, not permitted, ...), and a plain
+   * Error that it ran but its exit code was lost, so its output may be
+   * incomplete. The API token must allow the ssh command.
    *
    * @param vm The VM's name, optionally as user@name.
    * @param command A command line for the VM's shell.
@@ -82,8 +87,18 @@ export class ExedevClient extends Commands {
     if (!isNDJSON(res)) {
       throw new ExeAPIError(line, res.status, await res.text());
     }
-    const { output, exitCode } = await readSSHOutput(line, res);
-    return { exitCode, output, text: () => decodeUTF8(output) };
+    const { stdout, stderr, exitCode } = await readSSHOutput(line, res);
+    return {
+      exitCode,
+      stdoutBytes: stdout,
+      stderrBytes: stderr,
+      get stdout() {
+        return decodeUTF8(stdout);
+      },
+      get stderr() {
+        return decodeUTF8(stderr);
+      },
+    };
   }
 
   #post(command: string, options: CallOptions | undefined): Promise<Response> {
@@ -206,22 +221,38 @@ function isNDJSON(res: Response): boolean {
 }
 
 /**
- * Reads an ssh response in NDJSON: {"output": base64} lines, then one
- * {"exit_code": n}. A body that ends without the exit code, or breaks off, is
- * the output of a command whose connection ended before it did.
+ * Reads an ssh response in NDJSON: {"stdout": base64} and {"stderr": base64}
+ * lines, then one {"exit_code": n}, or {"error": message} if the VM never
+ * reported one. A body that ends with neither, or breaks off, was cut off.
  */
-async function readSSHOutput(command: string, res: Response): Promise<{ output: Uint8Array; exitCode: number }> {
-  const chunks: Uint8Array[] = [];
+async function readSSHOutput(
+  command: string,
+  res: Response,
+): Promise<{ stdout: Uint8Array; stderr: Uint8Array; combined: Uint8Array; exitCode: number }> {
+  const stdout: Uint8Array[] = [];
+  const stderr: Uint8Array[] = [];
+  const combined: Uint8Array[] = [];
   let exitCode: number | undefined;
+  let error: string | undefined;
   const frame = (line: string) => {
     if (line.trim() === "") {
       return;
     }
     const f = JSON.parse(line);
-    if (typeof f.output === "string") {
-      chunks.push(decodeBase64(f.output));
-    } else if (typeof f.exit_code === "number") {
+    for (const [name, chunks] of [
+      ["stdout", stdout],
+      ["stderr", stderr],
+    ] as const) {
+      if (typeof f[name] === "string") {
+        const bytes = decodeBase64(f[name]);
+        chunks.push(bytes);
+        combined.push(bytes);
+      }
+    }
+    if (typeof f.exit_code === "number") {
       exitCode = f.exit_code;
+    } else if (typeof f.error === "string") {
+      error = f.error;
     }
   };
   const cutOff = (cause?: unknown) =>
@@ -245,9 +276,9 @@ async function readSSHOutput(command: string, res: Response): Promise<{ output: 
   }
   frame(pending + decoder.decode());
   if (exitCode === undefined) {
-    throw cutOff();
+    throw error === undefined ? cutOff() : new Error(`exedev: ${command}: ${error}`);
   }
-  return { output: concat(chunks), exitCode };
+  return { stdout: concat(stdout), stderr: concat(stderr), combined: concat(combined), exitCode };
 }
 
 function decodeBase64(s: string): Uint8Array {

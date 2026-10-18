@@ -148,31 +148,41 @@ const ndjson = (lines, init) =>
 const b64 = (s) => Buffer.from(s, "latin1").toString("base64");
 
 test("exec asks for NDJSON, which carries ssh's exit code", async () => {
-  respond = () => ndjson([{ output: b64("hello\n") }, { exit_code: 3 }]);
+  respond = () => ndjson([{ stdout: b64("hello\n") }, { stderr: b64("oops\n") }, { exit_code: 3 }]);
   const res = await exe().exec("ssh my-vm false");
-  assert.deepEqual(res, { status: 200, body: "hello\n", ok: false, exitCode: 3 });
+  assert.deepEqual(res, { status: 200, body: "hello\noops\n", ok: false, exitCode: 3 });
   assert.match(requests[0].init.headers.Accept, /application\/x-ndjson/);
 });
 
-test("ssh returns the output, byte for byte, and the exit code", async () => {
+test("ssh returns stdout and stderr, byte for byte, and the exit code", async () => {
   const bin = "\x00\xff\xfe\x1b[31m\r\n";
-  respond = () => ndjson([{ output: b64("hi ") }, { output: b64(bin) }, { exit_code: 0 }]);
+  respond = () =>
+    ndjson([
+      { stdout: b64("hi ") },
+      { stderr: b64("warning\n") },
+      { stdout: b64(bin) },
+      { stderr: b64("done\n") },
+      { exit_code: 0 },
+    ]);
   const res = await exe().ssh("my-vm", "echo hi; cat x.bin");
   assert.deepEqual(sent(), [`ssh my-vm 'echo hi; cat x.bin'`]);
   assert.equal(res.exitCode, 0);
-  assert.deepEqual(res.output, new Uint8Array(Buffer.from("hi " + bin, "latin1")));
-  assert.equal(res.text(), "hi \x00\ufffd\ufffd\x1b[31m\r\n");
+  assert.deepEqual(res.stdoutBytes, new Uint8Array(Buffer.from("hi " + bin, "latin1")));
+  assert.equal(res.stdout, "hi \x00\ufffd\ufffd\x1b[31m\r\n");
+  assert.deepEqual(res.stderrBytes, new TextEncoder().encode("warning\ndone\n"));
+  assert.equal(res.stderr, "warning\ndone\n");
 });
 
 test("ssh reports a failed command as its exit code, not an error", async () => {
-  respond = () => ndjson([{ output: b64("nope\n") }, { exit_code: 7 }]);
+  respond = () => ndjson([{ stderr: b64("nope\n") }, { exit_code: 7 }]);
   const res = await exe().ssh("my-vm", "exit 7");
   assert.equal(res.exitCode, 7);
-  assert.equal(res.text(), "nope\n");
+  assert.equal(res.stdout, "");
+  assert.equal(res.stderr, "nope\n");
 });
 
 test("ssh reads frames split across chunks", async () => {
-  const body = [{ output: b64("one\n") }, { output: b64("two\n") }, { exit_code: 1 }]
+  const body = [{ stdout: b64("one\n") }, { stdout: b64("two\n") }, { exit_code: 1 }]
     .map((l) => JSON.stringify(l) + "\n")
     .join("");
   const bytes = new TextEncoder().encode(body);
@@ -187,13 +197,24 @@ test("ssh reads frames split across chunks", async () => {
       { headers: { "Content-Type": "application/x-ndjson" } },
     );
   const res = await exe().ssh("my-vm", "x");
-  assert.equal(res.text(), "one\ntwo\n");
+  assert.equal(res.stdout, "one\ntwo\n");
   assert.equal(res.exitCode, 1);
 });
 
 test("ssh rejects output that ends before the exit code", async () => {
-  respond = () => ndjson([{ output: b64("partial") }]);
+  respond = () => ndjson([{ stdout: b64("partial") }]);
   await assert.rejects(exe().ssh("my-vm", "cat big"), /before the command exited/);
+});
+
+test("ssh rejects with the error that ends a stream in place of the exit code", async () => {
+  const error = "the VM did not report the command's exit status; its output may be incomplete";
+  respond = () => ndjson([{ stdout: b64("partial") }, { error }]);
+  await assert.rejects(exe().ssh("my-vm", "cat big"), (err) => {
+    assert.ok(!(err instanceof ExeAPIError), "the command ran; ExeAPIError means it did not");
+    assert.equal(err.message, `exedev: ssh my-vm 'cat big': ${error}`);
+    return true;
+  });
+  await assert.rejects(exe().exec("ssh my-vm 'cat big'"), { message: new RegExp(error) });
 });
 
 test("ssh throws ExeAPIError when the command never ran", async () => {
@@ -212,7 +233,7 @@ test("ssh rejects a stream that breaks off", async () => {
     new Response(
       new ReadableStream({
         start(c) {
-          c.enqueue(new TextEncoder().encode(JSON.stringify({ output: b64("part") }) + "\n"));
+          c.enqueue(new TextEncoder().encode(JSON.stringify({ stdout: b64("part") }) + "\n"));
           c.error(new TypeError("terminated"));
         },
       }),

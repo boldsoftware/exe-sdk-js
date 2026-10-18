@@ -28,7 +28,7 @@ await exe.shareAdd("my-vm", "friend@example.com", { message: "have a look" });
 
 // Run a command on a VM.
 const run = await exe.ssh("my-vm", "uname -a");
-console.log(run.exitCode, run.text());
+console.log(run.exitCode, run.stdout, run.stderr);
 
 await exe.rm("my-vm");
 
@@ -73,12 +73,15 @@ options object accepts `signal` (an `AbortSignal`) for cancellation.
 ### `ssh(vm, command)`
 
 Runs a shell command on a VM, as `ssh my-vm 'command'` would, and resolves
-when it exits, to `{ exitCode, output, text() }`: `output` is the command's
-stdout and stderr, combined, as bytes, and `text()` decodes it as UTF-8. A
-nonzero exit code is a result, not an error; it rejects with `ExeAPIError` if
-the command never ran. The API token needs the `ssh` command.
+when it exits, to `{ exitCode, stdout, stderr }`, with the output decoded as
+UTF-8; `stdoutBytes` and `stderrBytes` have it byte for byte, for binary
+output. A nonzero exit code is a result, not an error. It rejects with
+`ExeAPIError` if the command never ran, and with an `Error` if it ran but
+its exit code was lost, so its output may be incomplete. The API token needs
+the `ssh` command.
 
-`exec("ssh my-vm ...")` reports the exit code too, as `exitCode`.
+`exec("ssh my-vm ...")` reports the exit code too, as `exitCode`, with stdout
+and stderr combined in `body`.
 
 ### Generated methods
 
