@@ -101,6 +101,11 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     assert.equal(res.exitCode, 7);
     assert.equal(res.stdout, "to-stdout\n");
     assert.equal(res.stderr, "to-stderr\n");
+
+    const chunks = [];
+    const streamed = await exe.ssh(name, "echo a; echo b", { onStdout: (s) => chunks.push(s) });
+    assert.equal(chunks.join(""), "a\nb\n");
+    assert.equal(streamed.stdout, "a\nb\n");
   });
 
   await t.test("cp", async () => {

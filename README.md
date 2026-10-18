@@ -80,6 +80,21 @@ output. A nonzero exit code is a result, not an error. It rejects with
 its exit code was lost, so its output may be incomplete. The API token needs
 the `ssh` command.
 
+To stream the output as it arrives, pass `onStdout` and `onStderr`. They are
+called with each chunk, decoded as UTF-8, one call at a time in the order the
+output arrives, and awaited; if one throws, the command is stopped and `ssh`
+rejects with its error:
+
+```js
+await exe.ssh("my-vm", "make", {
+  onStdout: (data) => process.stdout.write(data),
+  onStderr: (data) => process.stderr.write(data),
+});
+```
+
+stdout and stderr travel separately, so the order between their chunks is
+only approximate.
+
 `exec("ssh my-vm ...")` reports the exit code too, as `exitCode`, with stdout
 and stderr combined in `body`.
 

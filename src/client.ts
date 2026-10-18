@@ -24,6 +24,22 @@ export interface ExecResult {
   exitCode?: number;
 }
 
+/** Options for {@link ExedevClient.ssh}. */
+export interface SSHOptions extends CallOptions {
+  /**
+   * Called with each chunk of the command's standard output, decoded as
+   * UTF-8, as it arrives. Calls to onStdout and onStderr are made one at a
+   * time, in the order the output arrives, and awaited; if one throws, the
+   * command is stopped and ssh rejects with its error.
+   */
+  onStdout?: (data: string) => void | Promise<void>;
+  /**
+   * Like onStdout, for standard error. stdout and stderr travel separately,
+   * so the order between their chunks is only approximate.
+   */
+  onStderr?: (data: string) => void | Promise<void>;
+}
+
 /** The result of {@link ExedevClient.ssh}. */
 export interface SSHResult {
   /** The remote command's exit code. */
@@ -78,16 +94,34 @@ export class ExedevClient extends Commands {
    * Error that it ran but its exit code was lost, so its output may be
    * incomplete. The API token must allow the ssh command.
    *
+   * To stream the output as it arrives, pass onStdout and onStderr.
+   *
    * @param vm The VM's name, optionally as user@name.
    * @param command A command line for the VM's shell.
    */
-  async ssh(vm: string, command: string, options?: CallOptions): Promise<SSHResult> {
+  async ssh(vm: string, command: string, options?: SSHOptions): Promise<SSHResult> {
     const line = `ssh ${quote(vm)} ${quote(command)}`;
     const res = await this.#post(line, options);
     if (!isNDJSON(res)) {
       throw new ExeAPIError(line, res.status, await res.text());
     }
-    const { stdout, stderr, exitCode } = await readSSHOutput(line, res);
+    const callbacks = { stdout: options?.onStdout, stderr: options?.onStderr };
+    const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+    const call = async (name: StreamName, text: string) => {
+      if (text !== "") {
+        await callbacks[name]?.(text);
+      }
+    };
+    const { stdout, stderr, exitCode } = await readSSHOutput(line, res, async (name, bytes) => {
+      if (callbacks[name]) {
+        await call(name, decoders[name].decode(bytes, { stream: true }));
+      }
+    });
+    for (const name of ["stdout", "stderr"] as const) {
+      if (callbacks[name]) {
+        await call(name, decoders[name].decode());
+      }
+    }
     return {
       exitCode,
       stdoutBytes: stdout,
@@ -220,21 +254,28 @@ function isNDJSON(res: Response): boolean {
   return type.split(";")[0].trim().toLowerCase() === "application/x-ndjson";
 }
 
+type StreamName = "stdout" | "stderr";
+
 /**
  * Reads an ssh response in NDJSON: {"stdout": base64} and {"stderr": base64}
  * lines, then one {"exit_code": n}, or {"error": message} if the VM never
  * reported one. A body that ends with neither, or breaks off, was cut off.
+ *
+ * onOutput, if given, is called with each chunk of output as it is read, and
+ * awaited. If it throws, reading stops, the response is cancelled -- which
+ * closes the connection and so stops the command -- and the error propagates.
  */
 async function readSSHOutput(
   command: string,
   res: Response,
+  onOutput?: (stream: StreamName, bytes: Uint8Array) => void | Promise<void>,
 ): Promise<{ stdout: Uint8Array; stderr: Uint8Array; combined: Uint8Array; exitCode: number }> {
   const stdout: Uint8Array[] = [];
   const stderr: Uint8Array[] = [];
   const combined: Uint8Array[] = [];
   let exitCode: number | undefined;
   let error: string | undefined;
-  const frame = (line: string) => {
+  const frame = async (line: string) => {
     if (line.trim() === "") {
       return;
     }
@@ -247,6 +288,7 @@ async function readSSHOutput(
         const bytes = decodeBase64(f[name]);
         chunks.push(bytes);
         combined.push(bytes);
+        await onOutput?.(name, bytes);
       }
     }
     if (typeof f.exit_code === "number") {
@@ -260,21 +302,31 @@ async function readSSHOutput(
   const decoder = new TextDecoder();
   let pending = "";
   const reader = res.body?.getReader();
-  while (reader) {
-    let chunk: ReadableStreamReadResult<Uint8Array>;
-    try {
-      chunk = await reader.read();
-    } catch (err) {
-      throw cutOff(err);
+  let done = false;
+  try {
+    while (reader) {
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        throw cutOff(err);
+      }
+      if (chunk.done) {
+        break;
+      }
+      const lines = (pending + decoder.decode(chunk.value, { stream: true })).split("\n");
+      pending = lines.pop()!;
+      for (const line of lines) {
+        await frame(line);
+      }
     }
-    if (chunk.done) {
-      break;
+    done = true;
+  } finally {
+    if (!done) {
+      reader?.cancel().catch(() => {});
     }
-    const lines = (pending + decoder.decode(chunk.value, { stream: true })).split("\n");
-    pending = lines.pop()!;
-    lines.forEach(frame);
   }
-  frame(pending + decoder.decode());
+  await frame(pending + decoder.decode());
   if (exitCode === undefined) {
     throw error === undefined ? cutOff() : new Error(`exedev: ${command}: ${error}`);
   }

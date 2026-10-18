@@ -217,6 +217,79 @@ test("ssh rejects with the error that ends a stream in place of the exit code", 
   await assert.rejects(exe().exec("ssh my-vm 'cat big'"), { message: new RegExp(error) });
 });
 
+// A response whose NDJSON lines the test writes as it goes.
+const liveNDJSON = (source = {}) => {
+  const enc = (o) => new TextEncoder().encode(JSON.stringify(o) + "\n");
+  let controller;
+  const res = new Response(
+    new ReadableStream({
+      start(c) {
+        controller = c;
+      },
+      ...source,
+    }),
+    { headers: { "Content-Type": "application/x-ndjson" } },
+  );
+  return { res, send: (o) => controller.enqueue(enc(o)), close: () => controller.close() };
+};
+
+test("ssh calls onStdout as output arrives, before the command exits", { timeout: 5000 }, async () => {
+  const live = liveNDJSON();
+  respond = () => live.res;
+  let first;
+  const got = new Promise((r) => (first = r));
+  const run = exe().ssh("my-vm", "tail -f log", { onStdout: first });
+  live.send({ stdout: b64("first\n") });
+  assert.equal(await got, "first\n");
+  live.send({ exit_code: 0 });
+  live.close();
+  assert.equal((await run).stdout, "first\n");
+});
+
+test("ssh calls onStdout and onStderr in the order output arrives, one at a time", async () => {
+  respond = () =>
+    ndjson([{ stdout: b64("a") }, { stderr: b64("b") }, { stdout: b64("c") }, { stderr: b64("d") }, { exit_code: 2 }]);
+  const events = [];
+  const res = await exe().ssh("my-vm", "x", {
+    // Async callbacks are awaited: "err b" waits for "end a".
+    onStdout: async (s) => {
+      events.push(`start ${s}`);
+      await null;
+      events.push(`end ${s}`);
+    },
+    onStderr: (s) => events.push(`err ${s}`),
+  });
+  assert.deepEqual(events, ["start a", "end a", "err b", "start c", "end c", "err d"]);
+  assert.equal(res.exitCode, 2);
+  assert.equal(res.stdout, "ac");
+  assert.equal(res.stderr, "bd");
+});
+
+test("ssh decodes callback text across chunks that split a character", async () => {
+  respond = () =>
+    ndjson([{ stdout: b64("\xc3") }, { stdout: b64("\xa9!") }, { stderr: b64("\xe2") }, { exit_code: 0 }]);
+  const out = [];
+  const err = [];
+  await exe().ssh("my-vm", "x", { onStdout: (s) => out.push(s), onStderr: (s) => err.push(s) });
+  assert.deepEqual(out, ["é!"]);
+  assert.deepEqual(err, ["\ufffd"]);
+});
+
+test("ssh rejects with a callback's error, and stops reading", { timeout: 5000 }, async () => {
+  let cancelled = false;
+  const live = liveNDJSON({ cancel: () => (cancelled = true) });
+  respond = () => live.res;
+  const boom = new Error("boom");
+  const run = exe().ssh("my-vm", "x", {
+    onStdout() {
+      throw boom;
+    },
+  });
+  live.send({ stdout: b64("x") });
+  await assert.rejects(run, (err) => err === boom);
+  assert.ok(cancelled, "the response was not cancelled, so the command would keep running");
+});
+
 test("ssh throws ExeAPIError when the command never ran", async () => {
   respond = () => new Response('{"error":"VM \\"my-vm\\" not found"}\n', { status: 422 });
   await assert.rejects(exe().ssh("my-vm", "true"), (err) => {
