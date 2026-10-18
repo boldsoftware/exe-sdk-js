@@ -120,7 +120,7 @@ mutation or remote command after a transport failure.
 Generate a token via SSH:
 
 ```sh
-ssh exe.dev ssh-key generate-api-key --label=my-app --exp=30d --cmds="new,ls,ssh,rm"
+ssh exe.dev ssh-key generate-api-key --label=my-app --exp=30d --cmds="new,ls,ssh,share add,rm"
 ```
 
 See the [HTTPS API docs](https://exe.dev/docs/https-api) for permissions and scoping.
@@ -142,7 +142,8 @@ and live integration tests. Live tests require a tag-scoped token and create,
 copy, execute commands on, restart, rename, and delete their own test VMs.
 They read `$EXE_TOKEN`, or `$EXE_TOKEN_FILE` (a bare token or JSON containing
 `token`), or `~/.config/exedev/sdk-test-token`. The expected tag is `sdk-test`
-(override with `$EXE_TEST_TAG`). To create a test token:
+(override with `$EXE_TEST_TAG`). Set `$EXE_BASE_URL` to test another
+deployment, such as `https://exe-staging.dev`. To create a test token:
 
 ```sh
 ssh exe.dev 'ssh-key generate-api-key --label=sdk-test --tag=sdk-test --exp=30d --cmds="ls,new,whoami,stat,rm,restart,rename,cp,ssh,ssh-key list,share show" --json'
