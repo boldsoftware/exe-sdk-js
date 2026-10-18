@@ -32,7 +32,7 @@ function loadToken() {
 const token = loadToken();
 const skip = process.env.EXE_SKIP_INTEGRATION ? "EXE_SKIP_INTEGRATION is set" : false;
 
-test("integration", { skip, timeout: 180_000 }, async (t) => {
+test("integration", { skip, timeout: 300_000 }, async (t) => {
   assert.ok(
     token,
     `no API token: set EXE_TOKEN or write one to ${tokenFile} ` +
@@ -41,11 +41,12 @@ test("integration", { skip, timeout: 180_000 }, async (t) => {
   const exe = exedev({ token, baseURL: process.env.EXE_BASE_URL });
   const name = `sdk-test-${Date.now().toString(36)}`;
   const renamed = `${name}-r`;
+  const copy = `${name}-c`;
   const missing = `${name}-missing`;
 
   t.after(async () => {
     // Best-effort cleanup if a step below failed partway.
-    for (const vm of [name, renamed]) {
+    for (const vm of [name, renamed, copy]) {
       await exe.rm(vm).catch(() => {});
     }
   });
@@ -65,7 +66,7 @@ test("integration", { skip, timeout: 180_000 }, async (t) => {
   });
 
   await t.test("new", async () => {
-    const vm = await exe.new({ name });
+    const vm = await exe.new({ name, comment: "sdk integration test" });
     assert.equal(vm.vm_name, name);
     assert.ok(vm.tags.includes(tag), `new returned tags ${JSON.stringify(vm.tags)}, want ${tag}`);
   });
@@ -79,6 +80,37 @@ test("integration", { skip, timeout: 180_000 }, async (t) => {
     );
     assert.match(vm.ssh_dest, new RegExp(`^${name}\\.`));
     assert.match(vm.https_url, /^https:\/\//);
+    assert.equal(vm.comment, "sdk integration test");
+    assert.ok(Math.abs(Date.parse(vm.created_at) - Date.now()) < 3_600_000, `created_at ${vm.created_at}`);
+  });
+
+  await t.test("ssh", async () => {
+    // The VM is running before its sshd accepts connections.
+    let res;
+    for (let deadline = Date.now() + 60_000; ; ) {
+      try {
+        res = await exe.ssh(name, "echo to-stdout; echo to-stderr >&2; exit 7");
+        break;
+      } catch (err) {
+        if (!(err instanceof ExeAPIError) || !/failed to/.test(err.message) || Date.now() > deadline) {
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    assert.equal(res.exitCode, 7);
+    assert.match(res.text(), /to-stdout/);
+    assert.match(res.text(), /to-stderr/);
+  });
+
+  await t.test("cp", async () => {
+    const vm = await exe.cp(name, copy);
+    assert.equal(vm.name, copy);
+    assert.equal(vm.source, name);
+    assert.equal(vm.state, "starting");
+    assert.ok(vm.ssh.includes(copy), `ssh ${vm.ssh}`);
+    assert.equal(typeof vm.elapsed, "number");
+    assert.deepEqual(await exe.rm(copy), { deleted: [copy], failed: [] });
   });
 
   await t.test("stat", async () => {

@@ -6,7 +6,12 @@ export interface VM {
   status: string;
   region: string;
   region_display: string;
-  tags: string[];
+  /** Absent when the VM has no tags. */
+  tags?: string[];
+  /** The VM's comment, if it has one. */
+  comment?: string;
+  /** When the VM was created, in RFC 3339 format. */
+  created_at?: string;
 }
 
 export interface VMListResponse {
@@ -79,6 +84,26 @@ export interface NewResponse {
   error?: string;
 }
 
+/** The response to `cp`. */
+export interface CpResponse {
+  /** The new VM's name. */
+  name: string;
+  /** The new VM is still booting. */
+  state: "starting";
+  /** The VM it is a copy of. */
+  source: string;
+  /** The new VM's SSH destination, like ssh_dest in `ls`. */
+  ssh: string;
+  ssh_host: string;
+  ssh_user?: string;
+  /** How long the copy took, in seconds. */
+  elapsed: number;
+  /** The pool the new VM is in, if any. */
+  pool_id?: string;
+  pool_name?: string;
+  standalone?: boolean;
+}
+
 /** The response to `rm`. */
 export interface RmResponse {
   deleted: string[];
@@ -103,6 +128,7 @@ export interface RenameResponse {
  * here for its path, or to unknown.
  */
 export interface CommandResults {
+  cp: CpResponse;
   ls: VMListResponse;
   new: NewResponse;
   rm: RmResponse;

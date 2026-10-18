@@ -25,6 +25,11 @@ await exe.resize("my-vm", { memory: "8GB" });
 await exe.pause("my-vm");
 await exe.resume("my-vm");
 await exe.shareAdd("my-vm", "friend@example.com", { message: "have a look" });
+
+// Run a command on a VM.
+const run = await exe.ssh("my-vm", "uname -a");
+console.log(run.exitCode, run.text());
+
 await exe.rm("my-vm");
 
 // Run a raw command line.
@@ -65,6 +70,18 @@ Methods resolve to the command's JSON output, typed for the commands listed in
 `ExeAPIError` (`status`, `command`, `body`) when a command fails. Every
 options object accepts `signal` (an `AbortSignal`) for cancellation.
 
+### `ssh(vm, command)`
+
+Runs a shell command on a VM, as `ssh my-vm 'command'` would, and resolves
+when it exits, to `{ exitCode, output, text() }`: `output` is the command's
+stdout and stderr, combined, as bytes, and `text()` decodes it as UTF-8. A
+nonzero exit code is a result, not an error; it rejects with `ExeAPIError` if
+the command never ran. The API token needs the `ssh` command.
+
+`exec("ssh my-vm ...")` reports the exit code too, as `exitCode`.
+
+### Generated methods
+
 The command methods live in `src/commands.gen.ts`, which is generated from the
 exe.dev command tree; don't edit it by hand. To pick up new commands, run
 `npm run sync-commands -- path/to/exe` (default `../exe`) with an up-to-date
@@ -85,13 +102,14 @@ npm test
 
 `npm test` builds the package, then runs the unit tests and the integration
 tests. The integration tests run against the real exe.dev API and create,
-restart, rename and delete a VM. They need a tag-scoped API token, which can
-only see and touch VMs with its tag, and they fail without one (set
-`EXE_SKIP_INTEGRATION=1` to skip them). To create the token:
+copy, run a command on, restart, rename and delete a VM. They need a
+tag-scoped API token, which can only see and touch VMs with its tag, and they
+fail without one (set `EXE_SKIP_INTEGRATION=1` to skip them). To create the
+token:
 
 ```sh
 mkdir -p ~/.config/exedev
-ssh exe.dev 'ssh-key generate-api-key --label=sdk-test --tag=sdk-test --exp=30d --cmds="help,ls,new,whoami,stat,rm,restart,rename,ssh-key list,share show" --json' \
+ssh exe.dev 'ssh-key generate-api-key --label=sdk-test --tag=sdk-test --exp=30d --cmds="help,ls,new,whoami,stat,rm,restart,rename,cp,ssh,ssh-key list,share show" --json' \
   | jq -r .token > ~/.config/exedev/sdk-test-token
 chmod 600 ~/.config/exedev/sdk-test-token
 ```

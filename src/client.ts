@@ -16,10 +16,22 @@ export type ExecOptions = CallOptions;
 export interface ExecResult {
   /** HTTP status code. */
   status: number;
-  /** Raw response body. */
+  /** Raw response body; for ssh, the command's output. */
   body: string;
-  /** Whether the request succeeded (2xx). */
+  /** Whether the command succeeded: a 2xx status and, for ssh, exit code 0. */
   ok: boolean;
+  /** For ssh, the remote command's exit code. */
+  exitCode?: number;
+}
+
+/** The result of {@link ExedevClient.ssh}. */
+export interface SSHResult {
+  /** The remote command's exit code. */
+  exitCode: number;
+  /** The command's stdout and stderr, combined, as the VM wrote them. */
+  output: Uint8Array;
+  /** Returns output decoded as UTF-8. */
+  text(): string;
 }
 
 /**
@@ -46,17 +58,47 @@ export class ExedevClient extends Commands {
 
   /** Executes a raw command line against the exe.dev API. */
   async exec(command: string, options?: CallOptions): Promise<ExecResult> {
-    const res = await this.#fetch(`${this.#baseURL}/exec`, {
+    const res = await this.#post(command, options);
+    if (isNDJSON(res)) {
+      const { output, exitCode } = await readSSHOutput(command, res);
+      return { status: res.status, body: decodeUTF8(output), ok: res.ok && exitCode === 0, exitCode };
+    }
+    const body = await res.text();
+    return { status: res.status, body, ok: res.ok };
+  }
+
+  /**
+   * Runs a shell command on a VM, like `ssh <vm> <command>`, and resolves
+   * when it exits. A nonzero exit code is a result, not an error; ExeAPIError
+   * means the command never ran (no such VM, not permitted, ...). The API
+   * token must allow the ssh command.
+   *
+   * @param vm The VM's name, optionally as user@name.
+   * @param command A command line for the VM's shell.
+   */
+  async ssh(vm: string, command: string, options?: CallOptions): Promise<SSHResult> {
+    const line = `ssh ${quote(vm)} ${quote(command)}`;
+    const res = await this.#post(line, options);
+    if (!isNDJSON(res)) {
+      throw new ExeAPIError(line, res.status, await res.text());
+    }
+    const { output, exitCode } = await readSSHOutput(line, res);
+    return { exitCode, output, text: () => decodeUTF8(output) };
+  }
+
+  #post(command: string, options: CallOptions | undefined): Promise<Response> {
+    return this.#fetch(`${this.#baseURL}/exec`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.#token}`,
         "Content-Type": "text/plain",
+        // ssh otherwise sends its exit code in a trailer, which fetch cannot
+        // read; NDJSON puts it in the body. Other commands ignore this.
+        Accept: "application/json, application/x-ndjson",
       },
       body: command,
       signal: options?.signal,
     });
-    const body = await res.text();
-    return { status: res.status, body, ok: res.ok };
   }
 
   protected async run(
@@ -156,6 +198,79 @@ export function quote(s: string): string {
     return s;
   }
   return `'${s.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isNDJSON(res: Response): boolean {
+  const type = res.headers.get("Content-Type") ?? "";
+  return type.split(";")[0].trim().toLowerCase() === "application/x-ndjson";
+}
+
+/**
+ * Reads an ssh response in NDJSON: {"output": base64} lines, then one
+ * {"exit_code": n}. A body that ends without the exit code, or breaks off, is
+ * the output of a command whose connection ended before it did.
+ */
+async function readSSHOutput(command: string, res: Response): Promise<{ output: Uint8Array; exitCode: number }> {
+  const chunks: Uint8Array[] = [];
+  let exitCode: number | undefined;
+  const frame = (line: string) => {
+    if (line.trim() === "") {
+      return;
+    }
+    const f = JSON.parse(line);
+    if (typeof f.output === "string") {
+      chunks.push(decodeBase64(f.output));
+    } else if (typeof f.exit_code === "number") {
+      exitCode = f.exit_code;
+    }
+  };
+  const cutOff = (cause?: unknown) =>
+    new Error(`exedev: ${command}: output ended before the command exited`, { cause });
+  const decoder = new TextDecoder();
+  let pending = "";
+  const reader = res.body?.getReader();
+  while (reader) {
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      throw cutOff(err);
+    }
+    if (chunk.done) {
+      break;
+    }
+    const lines = (pending + decoder.decode(chunk.value, { stream: true })).split("\n");
+    pending = lines.pop()!;
+    lines.forEach(frame);
+  }
+  frame(pending + decoder.decode());
+  if (exitCode === undefined) {
+    throw cutOff();
+  }
+  return { output: concat(chunks), exitCode };
+}
+
+function decodeBase64(s: string): Uint8Array {
+  const bin = atob(s);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function decodeUTF8(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+function concat(chunks: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let at = 0;
+  for (const c of chunks) {
+    out.set(c, at);
+    at += c.length;
+  }
+  return out;
 }
 
 /**
