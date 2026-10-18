@@ -9,7 +9,15 @@ let respond;
 
 beforeEach(() => {
   requests = [];
-  respond = () => new Response("{}", { status: 200 });
+  respond = (_url, init) => {
+    const command = init.body;
+    if (command.startsWith("new")) return new Response(JSON.stringify({ vm_name: "my-vm", tags: [], ssh_dest: "my-vm.exe.xyz", https_url: "https://my-vm.exe.xyz" }));
+    if (command.startsWith("ls")) return new Response('{"vms":[]}');
+    if (command.startsWith("cp")) return new Response('{"name":"copy","ssh":"copy.exe.xyz","state":"starting"}');
+    if (command.startsWith("rename")) return new Response('{"old_name":"old","new_name":"new"}');
+    if (command.startsWith("ssh ")) return ndjson([{ exit_code: 0 }]);
+    return new Response("{}");
+  };
 });
 
 const exe = () =>
@@ -24,28 +32,31 @@ const exe = () =>
 
 const sent = () => requests.map((r) => r.init.body);
 
-test("exec posts the command with a bearer token", async () => {
+test("client posts the command with a bearer token", async () => {
   respond = () => new Response("hello", { status: 200 });
-  const res = await exe().exec("help");
-  assert.deepEqual(res, { status: 200, body: "hello", ok: true });
+  const res = await exe().doc("help");
+  assert.equal(res, "hello");
   assert.equal(requests[0].url, "https://example.test/exec");
   assert.equal(requests[0].init.method, "POST");
   assert.equal(requests[0].init.headers.Authorization, "Bearer exe1.test");
-  assert.equal(requests[0].init.body, "help");
+  assert.equal(requests[0].init.body, "doc help");
 });
 
 test("a token is required", () => {
   assert.throws(() => exedev({ token: "" }), /token is required/);
 });
 
-test("command methods return the parsed JSON", async () => {
-  respond = () => new Response(JSON.stringify({ vm_name: "my-vm", tags: [] }));
-  assert.deepEqual(await exe().new({ name: "my-vm" }), { vm_name: "my-vm", tags: [] });
+test("new returns a VM with normalized metadata", async () => {
+  const vm = await exe().new({ name: "my-vm", waitUntil: "created" });
+  assert.equal(vm.name, "my-vm");
+  assert.equal(vm.httpsUrl, "https://my-vm.exe.xyz");
+  assert.equal(typeof vm.ssh, "function");
   assert.deepEqual(sent(), ["new --name=my-vm"]);
 });
 
 test("options become flags, spelled as on the command line", async () => {
   await exe().new({
+    waitUntil: "created",
     name: "my-vm",
     image: "ubuntu:24.04",
     tag: ["a", "b"],
@@ -68,30 +79,32 @@ test("positionals: optional, variadic, and quoted", async () => {
   const c = exe();
   await c.ls();
   await c.ls("web-*", { l: true });
-  await c.rm(["a", "b"]);
-  await c.rm("a");
-  await c.rename("old", "new");
-  await c.comment("my-vm", "it's a VM");
-  await c.cp("src");
+  await c.vm("b").rm();
+  await c.vm("a").rm();
+  await c.vm("old").rename("new");
+  await c.vm("my-vm").comment("it's a VM");
+  await c.vm("src").cp({ waitUntil: "created" });
+  await c.vm("my-vm").tag(["a", "b"]);
   assert.deepEqual(sent(), [
     "ls",
     "ls --l 'web-*'",
-    "rm a b",
+    "rm b",
     "rm a",
     "rename old new",
     `comment my-vm 'it'"'"'s a VM'`,
     "cp src",
+    "tag my-vm a b",
   ]);
 });
 
 test("a positional that looks like a flag follows --", async () => {
-  await exe().comment("my-vm", "-x");
+  await exe().vm("my-vm").comment("-x");
   assert.deepEqual(sent(), ["comment -- my-vm -x"]);
 });
 
 test("subcommand paths become camel-cased methods", async () => {
   await exe().sshKeyList();
-  await exe().shareShow("my-vm");
+  await exe().vm("my-vm").shareShow();
   assert.deepEqual(sent(), ["ssh-key list", "share show my-vm"]);
 });
 
@@ -103,13 +116,13 @@ test("quote", () => {
   assert.equal(quote("it's"), `'it'"'"'s'`);
 });
 
-test("failures throw ExeAPIError with the server's message", async () => {
+test("failures throw ExeAPIError without exposing command arguments", async () => {
   respond = () => new Response('{"error":"nope"}', { status: 422 });
   await assert.rejects(exe().new({ name: "my-vm" }), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.status, 422);
-    assert.equal(err.command, "new --name=my-vm");
-    assert.equal(err.message, "exe.dev API error (422): nope");
+    assert.equal(err.operation, "new");
+    assert.equal(err.message, "exe.dev API error (422) during new");
     return true;
   });
 });
@@ -121,17 +134,17 @@ test("an error document throws despite a 200", async () => {
       '{"error":"VM \\"my-vm\\" not found"}\n{"deleted":[],"failed":["my-vm"]}\n',
       { status: 200 },
     );
-  await assert.rejects(exe().rm("my-vm"), (err) => {
+  await assert.rejects(exe().vm("my-vm").rm(), (err) => {
     assert.ok(err instanceof ExeAPIError);
-    assert.equal(err.command, "rm my-vm");
-    assert.equal(err.message, 'exe.dev API error (200): VM "my-vm" not found');
+    assert.equal(err.operation, "rm");
+    assert.match(err.details().body, /not found/);
     return true;
   });
 });
 
 test("a result with an error field alongside others is not a failure", async () => {
-  respond = () => new Response('{"vm_name":"my-vm","error":"shelley setup failed"}');
-  assert.equal((await exe().new()).vm_name, "my-vm");
+  respond = () => new Response('{"vm_name":"my-vm","ssh_dest":"my-vm.exe.xyz","https_url":"https://my-vm.exe.xyz","error":"shelley setup failed"}');
+  assert.equal((await exe().new({ waitUntil: "created" })).info.setupError, "shelley setup failed");
 });
 
 test("non-JSON output is returned as text", async () => {
@@ -147,12 +160,6 @@ const ndjson = (lines, init) =>
   });
 const b64 = (s) => Buffer.from(s, "latin1").toString("base64");
 
-test("exec asks for NDJSON, which carries ssh's exit code", async () => {
-  respond = () => ndjson([{ stdout: b64("hello\n") }, { stderr: b64("oops\n") }, { exit_code: 3 }]);
-  const res = await exe().exec("ssh my-vm false");
-  assert.deepEqual(res, { status: 200, body: "hello\noops\n", ok: false, exitCode: 3 });
-  assert.match(requests[0].init.headers.Accept, /application\/x-ndjson/);
-});
 
 test("ssh returns stdout and stderr, byte for byte, and the exit code", async () => {
   const bin = "\x00\xff\xfe\x1b[31m\r\n";
@@ -164,7 +171,7 @@ test("ssh returns stdout and stderr, byte for byte, and the exit code", async ()
       { stderr: b64("done\n") },
       { exit_code: 0 },
     ]);
-  const res = await exe().ssh("my-vm", "echo hi; cat x.bin");
+  const res = await exe().vm("my-vm").ssh("echo hi; cat x.bin");
   assert.deepEqual(sent(), [`ssh my-vm 'echo hi; cat x.bin'`]);
   assert.equal(res.exitCode, 0);
   assert.deepEqual(res.stdoutBytes, new Uint8Array(Buffer.from("hi " + bin, "latin1")));
@@ -175,7 +182,7 @@ test("ssh returns stdout and stderr, byte for byte, and the exit code", async ()
 
 test("ssh reports a failed command as its exit code, not an error", async () => {
   respond = () => ndjson([{ stderr: b64("nope\n") }, { exit_code: 7 }]);
-  const res = await exe().ssh("my-vm", "exit 7");
+  const res = await exe().vm("my-vm").ssh("exit 7");
   assert.equal(res.exitCode, 7);
   assert.equal(res.stdout, "");
   assert.equal(res.stderr, "nope\n");
@@ -196,25 +203,25 @@ test("ssh reads frames split across chunks", async () => {
       }),
       { headers: { "Content-Type": "application/x-ndjson" } },
     );
-  const res = await exe().ssh("my-vm", "x");
+  const res = await exe().vm("my-vm").ssh("x");
   assert.equal(res.stdout, "one\ntwo\n");
   assert.equal(res.exitCode, 1);
 });
 
 test("ssh rejects output that ends before the exit code", async () => {
   respond = () => ndjson([{ stdout: b64("partial") }]);
-  await assert.rejects(exe().ssh("my-vm", "cat big"), /before the command exited/);
+  await assert.rejects(exe().vm("my-vm").ssh("cat big"), /before the command exited/);
 });
 
 test("ssh rejects with the error that ends a stream in place of the exit code", async () => {
   const error = "the VM did not report the command's exit status; its output may be incomplete";
   respond = () => ndjson([{ stdout: b64("partial") }, { error }]);
-  await assert.rejects(exe().ssh("my-vm", "cat big"), (err) => {
+  await assert.rejects(exe().vm("my-vm").ssh("cat big"), (err) => {
     assert.ok(!(err instanceof ExeAPIError), "the command ran; ExeAPIError means it did not");
-    assert.equal(err.message, `exedev: ssh my-vm 'cat big': ${error}`);
+    assert.equal(err.details().message, error);
+    assert.equal(err.stdout, "partial");
     return true;
   });
-  await assert.rejects(exe().exec("ssh my-vm 'cat big'"), { message: new RegExp(error) });
 });
 
 // A response whose NDJSON lines the test writes as it goes.
@@ -238,7 +245,7 @@ test("ssh calls onStdout as output arrives, before the command exits", { timeout
   respond = () => live.res;
   let first;
   const got = new Promise((r) => (first = r));
-  const run = exe().ssh("my-vm", "tail -f log", { onStdout: first });
+  const run = exe().vm("my-vm").ssh("tail -f log", { onStdout: first });
   live.send({ stdout: b64("first\n") });
   assert.equal(await got, "first\n");
   live.send({ exit_code: 0 });
@@ -250,7 +257,7 @@ test("ssh calls onStdout and onStderr in the order output arrives, one at a time
   respond = () =>
     ndjson([{ stdout: b64("a") }, { stderr: b64("b") }, { stdout: b64("c") }, { stderr: b64("d") }, { exit_code: 2 }]);
   const events = [];
-  const res = await exe().ssh("my-vm", "x", {
+  const res = await exe().vm("my-vm").ssh("x", {
     // Async callbacks are awaited: "err b" waits for "end a".
     onStdout: async (s) => {
       events.push(`start ${s}`);
@@ -270,7 +277,7 @@ test("ssh decodes callback text across chunks that split a character", async () 
     ndjson([{ stdout: b64("\xc3") }, { stdout: b64("\xa9!") }, { stderr: b64("\xe2") }, { exit_code: 0 }]);
   const out = [];
   const err = [];
-  await exe().ssh("my-vm", "x", { onStdout: (s) => out.push(s), onStderr: (s) => err.push(s) });
+  await exe().vm("my-vm").ssh("x", { onStdout: (s) => out.push(s), onStderr: (s) => err.push(s) });
   assert.deepEqual(out, ["é!"]);
   assert.deepEqual(err, ["\ufffd"]);
 });
@@ -280,7 +287,7 @@ test("ssh rejects with a callback's error, and stops reading", { timeout: 5000 }
   const live = liveNDJSON({ cancel: () => (cancelled = true) });
   respond = () => live.res;
   const boom = new Error("boom");
-  const run = exe().ssh("my-vm", "x", {
+  const run = exe().vm("my-vm").ssh("x", {
     onStdout() {
       throw boom;
     },
@@ -290,13 +297,13 @@ test("ssh rejects with a callback's error, and stops reading", { timeout: 5000 }
   assert.ok(cancelled, "the response was not cancelled, so the command would keep running");
 });
 
-test("ssh throws ExeAPIError when the command never ran", async () => {
+test("ssh throws ExeAPIError for an API rejection", async () => {
   respond = () => new Response('{"error":"VM \\"my-vm\\" not found"}\n', { status: 422 });
-  await assert.rejects(exe().ssh("my-vm", "true"), (err) => {
+  await assert.rejects(exe().vm("my-vm").ssh("true"), (err) => {
     assert.ok(err instanceof ExeAPIError);
     assert.equal(err.status, 422);
-    assert.equal(err.command, "ssh my-vm true");
-    assert.equal(err.message, 'exe.dev API error (422): VM "my-vm" not found');
+    assert.equal(err.operation, "ssh");
+    assert.match(err.details().body, /not found/);
     return true;
   });
 });
@@ -312,9 +319,10 @@ test("ssh rejects a stream that breaks off", async () => {
       }),
       { headers: { "Content-Type": "application/x-ndjson" } },
     );
-  await assert.rejects(exe().ssh("my-vm", "cat big"), (err) => {
+  await assert.rejects(exe().vm("my-vm").ssh("cat big"), (err) => {
     assert.match(err.message, /before the command exited/);
-    assert.equal(err.cause.message, "terminated");
+    assert.equal(err.name, "SSHStreamError");
+    assert.equal(err.code, "interrupted");
     return true;
   });
 });
