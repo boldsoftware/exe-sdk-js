@@ -58,10 +58,11 @@ account/VM commands may return JSON or text and are typed as `unknown`.
 `vm.name` is the current name. `vm.httpsUrl`, `vm.sshDest`, and `vm.tags` expose
 common metadata. `vm.info` is a read-only snapshot with `status`, `region`,
 `comment`, `createdAt`, and `promptError` (why `new`'s `prompt` did not reach
-Shelley) when available. A reference from
-`exe.vm(name)` initially knows only its name. Copies do not invent a web URL;
-call `refresh()` to fetch it. A successful `rename()` updates the same object
-and invalidates old destinations; other references do not automatically change.
+Shelley) when available. A reference from `exe.vm(name)` initially knows only
+its name, with no tags; call `refresh()` to fetch the rest. A copy from `cp()`
+has the tags and web URL the server reports for it. A successful `rename()`
+updates the same object and invalidates old destinations; other references do
+not automatically change.
 
 ## Readiness and cancellation
 
