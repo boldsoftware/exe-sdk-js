@@ -1,4 +1,4 @@
-import exedev, { VM, VMReadyError, VMSetupError, SSHStreamError, quote } from "@exedev/sdk";
+import exedev, { VM, VMReadyError, VMSetupError, SSHStreamError, ExeNetworkError, quote } from "@exedev/sdk";
 import type { RmResponse, NewResponse, VMRecord, WaitOptions, ResumeResponse, ShareShowResponse } from "@exedev/sdk";
 
 async function publicAPI() {
@@ -75,6 +75,7 @@ function errors(error: unknown) {
   }
   if (error instanceof VMReadyError) return error.vm.rm();
   if (error instanceof SSHStreamError) console.log(error.stdout, error.code);
+  if (error instanceof ExeNetworkError) console.log(error.operation, error.details().cause);
 }
 void publicAPI;
 void errors;

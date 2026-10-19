@@ -52,6 +52,32 @@ export class ExeAPIError extends Error {
   details(): { body: string } { return { body: this.#body }; }
 }
 
+/**
+ * The request failed before a complete response arrived: a network error, or
+ * a connection lost while reading the response. Whether the operation took
+ * effect is unknown: new may have created a VM (pass a name to find it again).
+ */
+export class ExeNetworkError extends Error {
+  readonly #cause: unknown;
+  constructor(readonly operation: string, cause: unknown) {
+    const code = networkCode(cause);
+    super(`exedev: network error during ${operation}${code ? ` (${code})` : ""}; whether it took effect is unknown`);
+    this.name = "ExeNetworkError";
+    this.#cause = cause;
+  }
+  /** Opt-in diagnostics: the transport's error, which may describe the request. */
+  details(): { cause: unknown } { return { cause: this.#cause }; }
+}
+
+/** A system error code such as ECONNRESET or UND_ERR_SOCKET, from fetch's error or its cause. */
+function networkCode(err: unknown): string | undefined {
+  for (let e = err, depth = 0; e && typeof e === "object" && depth < 3; e = (e as { cause?: unknown }).cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,40}$/.test(code)) return code;
+  }
+  return undefined;
+}
+
 export class ExeProtocolError extends Error {
   constructor(readonly operation: string) {
     super(`exedev: invalid ${operation} response`);
@@ -99,7 +125,7 @@ export class Transport {
     this.#baseURL = (opts.baseURL ?? "https://exe.dev").replace(/\/$/, "");
     this.#fetch = opts.fetch ?? ((input, init) => fetch(input, init));
   }
-  async #post(command: string, options?: CallOptions): Promise<Response> {
+  async #post(operation: string, command: string, options?: CallOptions): Promise<Response> {
     const signal = options?.signal;
     signal?.throwIfAborted();
     try {
@@ -120,17 +146,17 @@ export class Transport {
       return response;
     } catch (err) {
       signal?.throwIfAborted();
-      throw err;
+      throw new ExeNetworkError(operation, err);
     }
   }
-  async #text(response: Response, signal?: AbortSignal): Promise<string> {
+  async #text(operation: string, response: Response, signal?: AbortSignal): Promise<string> {
     try {
       const body = await abortable(response.text(), signal);
       signal?.throwIfAborted();
       return body;
     } catch (err) {
       signal?.throwIfAborted();
-      throw err;
+      throw new ExeNetworkError(operation, err);
     }
   }
   async call(
@@ -150,8 +176,8 @@ export class Transport {
     path: string, args: readonly Arg[], options: CallOptions | undefined,
     flags: Readonly<Record<string, FlagKind>>,
   ): Promise<{ status: number; body: string; docs: unknown[] | undefined }> {
-    const res = await this.#post(commandLine(path, args, options, flags), options);
-    const body = await this.#text(res, options?.signal);
+    const res = await this.#post(path, commandLine(path, args, options, flags), options);
+    const body = await this.#text(path, res, options?.signal);
     if (!res.ok) throw new ExeAPIError(path, res.status, body);
     return { status: res.status, body, docs: parseDocuments(body) };
   }
@@ -162,14 +188,15 @@ export class Transport {
     }
     let res: Response;
     try {
-      res = await this.#post(`ssh ${quote(vm)} ${quote(command)}`, options);
+      res = await this.#post("ssh", `ssh ${quote(vm)} ${quote(command)}`, options);
     } catch (err) {
       options.signal?.throwIfAborted();
       // The request may have reached the VM: whether the command ran is unknown.
-      throw new SSHStreamError("interrupted", capture, new Uint8Array(), new Uint8Array(), undefined, err);
+      const cause = err instanceof ExeNetworkError ? err.details().cause : err;
+      throw new SSHStreamError("interrupted", capture, new Uint8Array(), new Uint8Array(), undefined, cause);
     }
     if (!res.ok) {
-      const body = await this.#text(res, options.signal);
+      const body = await this.#text("ssh", res, options.signal);
       throw new ExeAPIError("ssh", res.status, body);
     }
     if (!isNDJSON(res)) {
@@ -362,13 +389,20 @@ function parseDocuments(body: string): unknown[] | undefined {
   try { return text.split("\n").filter((s) => s.trim() !== "").map((s) => JSON.parse(s)); }
   catch { return undefined; }
 }
-/** The server's first error text, on one line and at most 200 characters. */
+/**
+ * Terminal escape sequences (CSI, OSC, and two-byte ESC sequences), then other
+ * control and bidirectional formatting characters: server text that reaches
+ * a log or a terminal cannot restyle or rewrite it.
+ */
+const escapes = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])/g;
+const controls = /[\p{Cc}\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+/** The server's first error text, on one line, without control characters, and at most 200 characters. */
 function errorText(body: string): string | undefined {
   const docs = parseDocuments(body) ?? [];
   const hasError = (doc: unknown) => typeof (doc as { error?: unknown } | null)?.error === "string";
   const doc = (docs.find(isErrorDocument) ?? docs.find(hasError)) as { error: unknown } | undefined;
   if (typeof doc?.error !== "string") return undefined;
-  const text = doc.error.replace(/\s+/g, " ").trim();
+  const text = doc.error.replace(escapes, "").replace(/\s+/g, " ").replace(controls, "").trim();
   return text.length > 200 ? `${text.slice(0, 199)}…` : text || undefined;
 }
 export function isErrorDocument(doc: unknown): boolean {

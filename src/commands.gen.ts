@@ -8,7 +8,8 @@ export interface CallOptions { signal?: AbortSignal; }
 export interface WaitOptions extends CallOptions {
   /**
    * ssh (the default): the VM runs commands. setup: also, its setup script
-   * (exeuntu's exe-setup.service) has finished, and succeeded. Both need ssh permission.
+   * (exeuntu's exe-setup.service) has finished, and succeeded; or there is none.
+   * Both need ssh permission.
    */
   waitUntil?: "ssh" | "setup";
   /** Deadline in milliseconds, including requests and backoff. Default 60,000; 600,000 for setup. */
@@ -1804,7 +1805,10 @@ export class ExedevClient {
   }
 }
 
-/** A VM reference. info is a snapshot; refresh() fetches current metadata. */
+/**
+ * A VM reference. info is a snapshot: the SDK's own operations update it
+ * (readiness, pause, resume, comment, tag), and refresh() fetches the rest.
+ */
 export class VM {
   readonly #transport: Transport;
   #info: Readonly<VMInfo>;
@@ -1818,6 +1822,17 @@ export class VM {
   get httpsUrl(): string | undefined { return this.#info.httpsUrl; }
   get sshDest(): string | undefined { return this.#info.sshDest; }
   get tags(): readonly string[] { return this.#info.tags; }
+
+  /** Take the status, comment, and tags a VM command reports into the snapshot. */
+  #absorb(result: unknown): void {
+    const r = result as { vm_name?: unknown; status?: unknown; comment?: unknown; tags?: unknown } | null;
+    if (r?.vm_name !== this.name) return;
+    const info: { -readonly [K in keyof VMInfo]: VMInfo[K] } = { ...this.#info };
+    if (typeof r.status === "string") info.status = r.status;
+    if (typeof r.comment === "string") info.comment = r.comment;
+    if (Array.isArray(r.tags) && r.tags.every((t) => typeof t === "string")) info.tags = Object.freeze([...r.tags]);
+    this.#info = Object.freeze(info);
+  }
 
   /** Run a shell command once. Nonzero exit codes are results, not exceptions. */
   ssh(command: string, options?: SSHOptions): Promise<SSHResult> {
@@ -1837,7 +1852,8 @@ export class VM {
    * Probe SSH with `true` until it exits successfully. Never reruns a user command.
    * With waitUntil: "setup", then poll exe-setup.service until the setup script
    * has finished, throwing VMSetupError (as VMReadyError's cause) if it failed.
-   * Images without that unit (anything but exeuntu) have no setup to wait for.
+   * A script on an image without that unit (anything not built on exeuntu)
+   * is never run: that is a VMSetupError too, with result "unsupported".
    * This does not wait for application servers. Requires ssh permission.
    */
   async waitUntilReady(options: WaitOptions = {}): Promise<this> {
@@ -1860,9 +1876,12 @@ export class VM {
           }), controller.signal);
           controller.signal.throwIfAborted();
           if (result.exitCode !== 0) throw new ExeProtocolError("ssh readiness probe");
-          if (waitUntil === "ssh") return this;
-          const state = setupState(result.stdout);
-          if (state === "done") return this;
+          const state = waitUntil === "ssh" ? "done" : setupState(result.stdout);
+          if (state === "done") {
+            // It answered over SSH, so it is running, whatever new or cp said then.
+            this.#absorb({ vm_name: this.name, status: "running" });
+            return this;
+          }
           if (state instanceof VMSetupError) throw state;
           backoff = Math.max(backoff, 1000);
         } catch (err) {
@@ -1930,6 +1949,7 @@ export class VM {
    */
   async pause(options?: CallOptions): Promise<CommandResult<"pause">> {
     const result = await this.#transport.call("pause", [this.name], options, {}, true);
+    this.#absorb(result);
     return result;
   }
 
@@ -1944,6 +1964,7 @@ export class VM {
     const ready = readiness(options ?? {});
     const { waitUntil, timeoutMs, ...flags } = options ?? {};
     const result = await this.#transport.call("resume", [this.name], flags, {}, true);
+    this.#absorb(result);
     if (ready) await this.waitUntilReady(ready);
     return this;
   }
@@ -1981,6 +2002,7 @@ export class VM {
     const result = await this.#transport.call("tag", [this.name, tagNames], options, {
       d: "bool",
     }, true);
+    this.#absorb(result);
     return result;
   }
 
@@ -2048,6 +2070,7 @@ export class VM {
    */
   async comment(text: string, options?: CallOptions): Promise<CommandResult<"comment">> {
     const result = await this.#transport.call("comment", [this.name, text], options, {}, true);
+    this.#absorb(result);
     return result;
   }
 
@@ -2286,17 +2309,27 @@ function readyFailure(cause: unknown): string {
   return "is not SSH-ready";
 }
 
-/** The VM's setup script failed. details() has the end of its journal. */
+/**
+ * The VM's setup script failed, or did not run. details() has the end of its
+ * journal when it ran.
+ */
 export class VMSetupError extends Error {
   readonly #output: string;
   constructor(
-    /** systemd's Result for exe-setup.service, e.g. "exit-code", "signal", or "timeout". */
+    /**
+     * systemd's Result for exe-setup.service, e.g. "exit-code", "signal", or
+     * "timeout"; or "unsupported" when the VM's image does not run setup
+     * scripts (only exeuntu and images built on it do), and "not-run" when
+     * the script is in place but was not run this boot.
+     */
     readonly result: string,
     readonly exitCode: number | undefined,
     readonly signal: number | undefined,
     output: string,
   ) {
-    super(`exedev: setup script failed (${exitCode !== undefined ? `exit code ${exitCode}` : signal !== undefined ? `signal ${signal}` : result})`);
+    super(result === "unsupported" ? "exedev: setup script did not run: this VM's image does not run setup scripts" :
+      result === "not-run" ? "exedev: setup script did not run" :
+      `exedev: setup script failed (${exitCode !== undefined ? `exit code ${exitCode}` : signal !== undefined ? `signal ${signal}` : result})`);
     this.name = "VMSetupError";
     this.#output = output;
   }
@@ -2321,10 +2354,13 @@ function readiness(options: ReadyOptions): WaitOptions | undefined {
   return waitUntil === "created" ? undefined : { waitUntil, timeoutMs, signal };
 }
 
-// Report exe-setup.service's state, and on failure the end of its journal.
-// exessh can answer before exe-init hands PID 1 to systemd, and then before
-// systemd's bus is up ("Failed to connect to bus"): both are "booting".
-const setupProbe = `if [ ! -d /run/systemd/system ]; then
+// Report exe-setup.service's state, whether a setup script is in place, and
+// on failure the end of its journal. exe-init puts /exe.dev/setup in place
+// before exessh answers, and the unit removes it once it has run. exessh can
+// answer before exe-init hands PID 1 to systemd, and then before systemd's
+// bus is up ("Failed to connect to bus"): both are "booting".
+const setupProbe = `if [ -e /exe.dev/setup ]; then echo Setup=present; else echo Setup=absent; fi
+if [ ! -d /run/systemd/system ]; then
   if [ -e /etc/systemd/system/exe-setup.service ]; then echo State=booting; else echo State=unsupported; fi
   exit 0
 fi
@@ -2336,7 +2372,7 @@ if [ "$(systemctl show exe-setup.service -p ActiveState --value)" = failed ]; th
   journalctl -b -u exe-setup.service -o cat --no-pager -n 50 2>&1
 fi`;
 
-/** "done" covers success and having no setup script, or no setup runner, to wait for. */
+/** "done" covers success and having no setup script to wait for. */
 function setupState(output: string): "pending" | "done" | VMSetupError {
   const [head, ...journal] = output.split("\n---\n");
   const p: Record<string, string> = {};
@@ -2345,10 +2381,14 @@ function setupState(output: string): "pending" | "done" | VMSetupError {
     if (at > 0) p[line.slice(0, at)] = line.slice(at + 1).trim();
   }
   const number = (key: string) => /^\d+$/.test(p[key] ?? "") ? Number(p[key]) : undefined;
-  if (p.State === "booting") return "pending";
-  if (p.State === "unsupported" || p.LoadState === "not-found") return "done";
+  if (p.Setup !== "present" && p.Setup !== "absent") throw new ExeProtocolError("ssh setup probe");
+  const script = p.Setup === "present";
+  const notRun = (result: string) => new VMSetupError(result, undefined, undefined, "");
+  // Early in boot, the unit cannot have run yet: without a script it has nothing to run.
+  if (p.State === "booting") return script ? "pending" : "done";
+  if (p.State === "unsupported" || p.LoadState === "not-found") return script ? notRun("unsupported") : "done";
   if (!p.LoadState || !p.ActiveState) throw new ExeProtocolError("ssh setup probe");
-  if (p.Job && p.Job !== "0" || ["activating", "deactivating", "reloading"].includes(p.ActiveState)) return "pending";
+  if (["activating", "deactivating", "reloading"].includes(p.ActiveState)) return "pending";
   if (p.ActiveState === "failed" || number("ExecMainExitTimestampMonotonic") && p.Result !== "success") {
     // ExecMainCode: 1 exited, 2 killed, 3 dumped core. ExecMainStatus is the code or signal.
     const code = number("ExecMainCode"), status = number("ExecMainStatus");
@@ -2357,8 +2397,12 @@ function setupState(output: string): "pending" | "done" | VMSetupError {
   }
   if (number("ExecMainExitTimestampMonotonic")) return "done";
   if (number("ConditionTimestampMonotonic") && p.ConditionResult === "no") return "done";
+  // The unit has not run this boot. With no script, it has nothing to run:
+  // a restart need not wait for boot to reach it.
+  if (!script) return "done";
   // Not reached yet while the system boots; otherwise it is not going to run.
-  return ["initializing", "starting"].includes(p.SystemState) ? "pending" : "done";
+  if (p.Job && p.Job !== "0" || ["initializing", "starting"].includes(p.SystemState)) return "pending";
+  return notRun("not-run");
 }
 
 function rmResult(value: { docs: unknown[] | undefined }): RmResponse {

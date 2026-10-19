@@ -64,9 +64,11 @@ common metadata. `vm.info` is a read-only snapshot with `status`, `region`,
 `comment`, `createdAt`, and `promptError` (why `new`'s `prompt` did not reach
 Shelley) when available. A reference from `exe.vm(name)` initially knows only
 its name, with no tags; call `refresh()` to fetch the rest. A copy from `cp()`
-has the tags and web URL the server reports for it. A successful `rename()`
-updates the same object and invalidates old destinations; other references do
-not automatically change.
+has the tags and web URL the server reports for it. The SDK's own operations
+update the snapshot: a VM that passed a readiness wait is `running`, and
+`pause()`, `resume()`, `comment()`, and `tag()` record what they changed. A
+successful `rename()` updates the same object and invalidates old destinations.
+Other references, and changes made elsewhere, need `refresh()`.
 
 ## Readiness and cancellation
 
@@ -84,9 +86,11 @@ not wait for application servers.
 `"setup-script"`, run by exeuntu's `exe-setup.service`) to finish, polling the
 unit over SSH with a default deadline of 10 minutes. If the script failed, the
 `VMReadyError`'s `cause` is a `VMSetupError` with `exitCode` (or `signal`) and
-systemd's `result`; `details().output` has the end of its journal. Images
-without that unit, such as `ubuntu:24.04`, do not run setup scripts, so there
-is nothing to wait for.
+systemd's `result`; `details().output` has the end of its journal. Only exeuntu,
+the default image, and images built on it run setup scripts: on others, such
+as `ubuntu:24.04`, the script is not run, and waiting for it is a
+`VMSetupError` with `result` `"unsupported"`. Without a script there is nothing
+to wait for, and once a script has run, a later restart does not wait for it.
 
 ```ts
 const vm = await exe.new({ "setup-script": "#!/bin/sh\nsudo apt-get install -y jq", waitUntil: "setup" });
@@ -139,10 +143,17 @@ is ignored in this mode. Invalid or oversized NDJSON frames are always rejected.
 ## Errors
 
 - `ExeAPIError`: `operation` and HTTP `status`. The message includes the
-  server's error text, on one line and shortened to 200 characters, for example
+  server's error text, on one line, without terminal escapes or other control
+  characters, and shortened to 200 characters, for example
   `exe.dev API error (422) during ssh: VM "web" is not running`. It never
   includes the request, but the server's text can mention values you sent.
   `error.details().body` has the full response; this may contain secrets.
+- `ExeNetworkError`: the request failed before a complete response arrived,
+  such as a network error or a connection lost while reading the response.
+  `operation` names the command, and the message the system error code when
+  there is one. Whether the operation took effect is unknown: `new` may have
+  created a VM, so pass a `name` if you need to find it again. `details().cause`
+  has the transport's error.
 - `ExeProtocolError`: an incompatible response, including malformed JSON or a
   server that does not support NDJSON SSH output.
 - `SSHStreamError`: interrupted/invalid output or a capture limit. `code` is
@@ -152,7 +163,8 @@ is ignored in this mode. Invalid or oversized NDJSON frames are always rejected.
   have started. `details()` exposes opt-in diagnostics: the server's message or
   the transport's error.
 - `VMReadyError`: readiness failed; `vm` and `cause` are available.
-- `VMSetupError`: the setup script failed; the `cause` of a `VMReadyError`.
+- `VMSetupError`: the setup script failed or did not run; the `cause` of a
+  `VMReadyError`.
 
 Errors do not establish that an operation never ran. Do not blindly retry a
 mutation or remote command after a transport failure.

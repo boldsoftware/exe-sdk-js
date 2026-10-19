@@ -4,7 +4,7 @@ import { ExedevClient } from "./commands.gen.js";
 import type { ExedevOptions } from "./client.js";
 
 export { ExedevClient, VM, VMReadyError, VMSetupError } from "./commands.gen.js";
-export { ExeAPIError, ExeProtocolError, SSHStreamError, quote } from "./client.js";
+export { ExeAPIError, ExeNetworkError, ExeProtocolError, SSHStreamError, quote } from "./client.js";
 export type { ExedevOptions, SSHOptions, SSHResult } from "./client.js";
 export type * from "./commands.gen.js";
 export type * from "./types.js";

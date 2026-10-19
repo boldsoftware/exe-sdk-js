@@ -1,7 +1,8 @@
 // Unit tests: run against the built dist/ with a fake fetch.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import exedev, { ExeAPIError } from "../dist/index.js";
+import { inspect } from "node:util";
+import exedev, { ExeAPIError, ExeNetworkError } from "../dist/index.js";
 import { quote } from "../dist/client.js";
 
 let requests;
@@ -138,6 +139,48 @@ test("the server's reason is one line of at most 200 characters", async () => {
   });
   respond = () => new Response("<html>bad gateway</html>", { status: 502 });
   await assert.rejects(exe().vm("my-vm").pause(), { message: "exe.dev API error (502) during pause" });
+});
+
+test("the server's reason carries no terminal escapes or control characters", async () => {
+  // As the server sent it for ssh to a stopped VM.
+  respond = () => new Response(JSON.stringify({
+    error: 'VM "my-vm" is not running.\n\nTo see why it failed, run:\n\n    \u001b[1mvm-logs my-vm\u001b[0m\n',
+  }), { status: 422 });
+  await assert.rejects(exe().vm("my-vm").pause(), {
+    message: 'exe.dev API error (422) during pause: VM "my-vm" is not running. To see why it failed, run: vm-logs my-vm',
+  });
+  respond = () => new Response(JSON.stringify({
+    error: "a\u001b]8;;https://evil.test\u0007link\u001b]8;;\u0007 \u001b[2K\rb\u0000\u0007\u009b31m\u202eevil\u202c c",
+  }), { status: 422 });
+  await assert.rejects(exe().vm("my-vm").pause(), (err) => {
+    assert.equal(err.message, "exe.dev API error (422) during pause: alink b31mevil c");
+    // The full body stays as sent, for opt-in diagnostics.
+    assert.match(err.details().body, /\\u001b/);
+    return true;
+  });
+});
+
+test("a failed request is an ExeNetworkError for every operation, with its cause opt-in", async () => {
+  const failure = () => { throw new TypeError("fetch failed: Authorization: Bearer exe1.secret", { cause: Object.assign(new Error("socket"), { code: "UND_ERR_SOCKET" }) }); };
+  for (const call of [(c) => c.new({ name: "my-vm" }), (c) => c.ls(), (c) => c.whoami(), (c) => c.vm("my-vm").restart({ waitUntil: "created" })]) {
+    respond = failure;
+    await assert.rejects(call(exe()), (err) => {
+      assert.ok(err instanceof ExeNetworkError, String(err));
+      assert.match(err.message, /^exedev: network error during (new|ls|whoami|restart) \(UND_ERR_SOCKET\); whether it took effect is unknown$/);
+      assert.match(err.details().cause.message, /exe1\.secret/);
+      assert.doesNotMatch(inspect(err), /exe1\.secret/);
+      return true;
+    });
+  }
+  // A connection lost while reading the response is the same: the server may have acted.
+  respond = () => new Response(new ReadableStream({ pull(c) { c.error(new Error("reset")); } }));
+  await assert.rejects(exe().new({ name: "my-vm" }), (err) => err instanceof ExeNetworkError && err.operation === "new" &&
+    err.message === "exedev: network error during new; whether it took effect is unknown");
+  // The caller's own cancellation is still the caller's reason.
+  const abort = new AbortController();
+  const reason = new Error("stop");
+  respond = () => { abort.abort(reason); throw new DOMException("aborted", "AbortError"); };
+  await assert.rejects(exe().ls(undefined, { signal: abort.signal }), (err) => err === reason);
 });
 
 test("an error document throws despite a 200", async () => {

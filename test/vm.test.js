@@ -205,42 +205,73 @@ test("VM metadata contracts fail explicitly on incompatible server JSON", async 
 const stdout = (text, code = 0) => new Response(
   `${JSON.stringify({ stdout: Buffer.from(text).toString("base64") })}\n{"exit_code":${code}}\n`,
   { headers: { "Content-Type": "application/x-ndjson" } });
-// systemctl show output for exe-setup.service, as observed on exeuntu.
-const unitText = (props, system = "running") => Object.entries({
+// The setup probe's output: whether /exe.dev/setup is in place, then
+// systemctl show for exe-setup.service, as observed on exeuntu.
+const unitText = (props, system = "running", setup = "present") => `Setup=${setup}\n` + Object.entries({
   LoadState: "loaded", ActiveState: "inactive", Result: "success", ExecMainCode: "0", ExecMainStatus: "0",
   ExecMainExitTimestampMonotonic: "0", ConditionResult: "no", ConditionTimestampMonotonic: "0", ...props,
 }).map(([k, v]) => `${k}=${v}`).join("\n") + `\nSystemState=${system}\n`;
-const unit = (props, system) => stdout(unitText(props, system));
+const unit = (props, system, setup) => stdout(unitText(props, system, setup));
+const early = (state, setup = "present") => stdout(`Setup=${setup}\nState=${state}\n`);
 
 test("waitUntil setup polls the setup unit until its script has run", async (t) => {
   const time = clock(t);
   const states = [
-    stdout("State=booting\n"),
+    early("booting"),
     unit({ ActiveState: "inactive", Job: "90" }, "starting"),
     unit({ ActiveState: "activating" }, "starting"),
-    unit({ ExecMainCode: "1", ExecMainExitTimestampMonotonic: "123", ConditionResult: "yes", ConditionTimestampMonotonic: "5" }),
+    unit({ ExecMainCode: "1", ExecMainExitTimestampMonotonic: "123", ConditionResult: "yes", ConditionTimestampMonotonic: "5" }, "running", "absent"),
   ];
   const { exe, commands } = fixture((command) => command.startsWith("new") ? json(info()) : states.shift());
   const created = exe.new({ waitUntil: "setup" });
   for (let i = 0; i < 3; i++) await time.fire(1000 * 2 ** i > 2000 ? 2000 : 1000 * 2 ** i);
   const vm = await created;
   assert.equal(vm.name, "worker");
+  assert.equal(vm.info.status, "running");
   assert.equal(commands.length, 5);
   assert.match(commands[1], /^ssh worker '.*systemctl show exe-setup.service/s);
   assert.ok(commands.slice(1).every((c) => c === commands[1]), "the probe never changes");
   assert.equal(time.timers.size, 0);
 });
 
-test("waitUntil setup has nothing to wait for without a script or a setup unit", async () => {
+test("waitUntil setup has nothing to wait for without a script", async () => {
   for (const output of [
-    unit({ ConditionTimestampMonotonic: "5", ConditionResult: "no" }),
-    unit({ LoadState: "not-found" }),
-    stdout("State=unsupported\n"),
-    unit({}, "degraded"), // Never started, and the system finished booting.
+    unit({ ConditionTimestampMonotonic: "5", ConditionResult: "no" }, "running", "absent"),
+    // Images without a setup runner, when there is no script for one.
+    unit({ LoadState: "not-found" }, "running", "absent"),
+    early("unsupported", "absent"),
+    // A restart: the script ran on an earlier boot and is gone, so there is
+    // no need to wait for boot to reach the unit, which will skip it.
+    unit({ Job: "90" }, "starting", "absent"),
+    early("booting", "absent"),
   ]) {
-    const { exe } = fixture(() => output);
+    const { exe, commands } = fixture(() => output);
     await exe.vm("worker").waitUntilReady({ waitUntil: "setup" });
+    assert.equal(commands.length, 1);
   }
+});
+
+test("a setup script that will not run is an error, not success", async () => {
+  for (const [output, result, message] of [
+    // The image has no setup runner: anything but exeuntu and images built on it.
+    [unit({ LoadState: "not-found" }), "unsupported", "exedev: VM worker setup script did not run: this VM's image does not run setup scripts"],
+    [early("unsupported"), "unsupported", "exedev: VM worker setup script did not run: this VM's image does not run setup scripts"],
+    // The runner exists, boot has finished, and nothing ran it.
+    [unit({}, "degraded"), "not-run", "exedev: VM worker setup script did not run"],
+  ]) {
+    const { exe } = fixture((command) => command.startsWith("new") ? json(info()) : output);
+    await assert.rejects(exe.new({ waitUntil: "setup", "setup-script": "#!/bin/sh\ntrue" }), (err) => {
+      assert.ok(err instanceof VMReadyError);
+      assert.equal(err.vm.name, "worker", "the VM is kept for inspection or cleanup");
+      assert.ok(err.cause instanceof VMSetupError);
+      assert.equal(err.cause.result, result);
+      assert.equal(err.message, message);
+      return true;
+    });
+  }
+  // A probe answer without the script's state is not taken for success.
+  const { exe } = fixture(() => stdout("State=unsupported\n"));
+  await assert.rejects(exe.vm("worker").waitUntilReady({ waitUntil: "setup" }), (err) => err.cause?.name === "ExeProtocolError");
 });
 
 test("a failed setup script rejects with its result and opt-in output", async () => {
@@ -306,4 +337,42 @@ test("ssh reports a failed request as an interrupted command, keeping the cause 
 test("quote is exported for interpolating values into ssh commands", () => {
   assert.equal(quote("plain-word"), "plain-word");
   assert.equal(quote("it's $HOME"), `'it'"'"'s $HOME'`);
+});
+
+test("the info snapshot follows what the SDK itself observes and changes", async () => {
+  const { exe } = fixture((command) => {
+    if (command.startsWith("new")) return json(info());
+    if (command.startsWith("cp")) return json({ name: "copy", ssh: "copy.exe.xyz", https_url: "https://copy.exe.xyz", state: "starting", tags: ["test"] });
+    if (command.startsWith("pause")) return json({ vm_name: "worker", status: "paused" });
+    if (command.startsWith("resume")) return json({ vm_name: "worker", status: "running", cold_booted: "false" });
+    if (command.startsWith("comment")) return json({ vm_name: "worker", comment: "updated" });
+    if (command.startsWith("tag")) return json({ vm_name: "worker", tags: ["test", "prod"] });
+    return exited();
+  });
+  const vm = await exe.new({ waitUntil: "created" });
+  // A copy that answered over SSH is running, whatever cp said when it returned.
+  const copy = await vm.cp();
+  assert.equal(copy.info.status, "running");
+  assert.equal((await vm.cp({ waitUntil: "created" })).info.status, "starting");
+
+  const before = vm.info;
+  assert.equal((await vm.pause()).status, "paused");
+  assert.equal(vm.info.status, "paused");
+  assert.equal(before.status, "running", "earlier snapshots do not change");
+  assert.ok(Object.isFrozen(vm.info));
+  assert.equal(await vm.resume({ waitUntil: "created" }), vm);
+  assert.equal(vm.info.status, "running");
+  await vm.comment("updated");
+  assert.equal(vm.info.comment, "updated");
+  await vm.tag("prod");
+  assert.deepEqual(vm.tags, ["test", "prod"]);
+  assert.ok(Object.isFrozen(vm.tags));
+});
+
+test("results about another VM do not change this one's snapshot", async () => {
+  const { exe } = fixture(() => json({ vm_name: "other", status: "paused", comment: "x", tags: [] }));
+  const vm = exe.vm("worker");
+  await vm.pause();
+  await vm.comment("x");
+  assert.deepEqual({ ...vm.info }, { name: "worker", tags: [] });
 });
