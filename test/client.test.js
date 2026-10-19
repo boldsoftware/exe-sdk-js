@@ -54,6 +54,8 @@ test("new returns a VM with normalized metadata", async () => {
   assert.equal(vm.httpsUrl, "https://my-vm.exe.xyz");
   assert.equal(typeof vm.ssh, "function");
   assert.deepEqual(sent(), ["new --name=my-vm"]);
+  respond = () => new Response(JSON.stringify({ vm_name: "my-vm", tags: [], ssh_dest: "my-vm.exe.xyz", https_url: "https://my-vm.exe.xyz", comment: "note" }));
+  assert.equal((await exe().new({ comment: "note", waitUntil: "created" })).info.comment, "note");
 });
 
 test("options become flags, spelled as on the command line", async () => {

@@ -80,6 +80,8 @@ export interface NewResponse {
   shelley_url?: string;
   vscode_url?: string;
   xterm_url?: string;
+  /** The --comment the VM was created with; absent when there is none. */
+  comment?: string;
   pool_id?: string;
   standalone?: boolean;
   /** Set when the VM was created but a later setup step failed. */

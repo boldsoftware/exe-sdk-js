@@ -1,6 +1,6 @@
 {
   "name": "@exedev/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Official JavaScript/TypeScript SDK for the exe.dev API",
   "type": "module",
   "main": "dist/index.js",
