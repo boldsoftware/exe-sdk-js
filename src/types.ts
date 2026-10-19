@@ -133,6 +133,9 @@ export interface RenameResponse {
   status: "renamed";
   old_name: string;
   new_name: string;
+  /** Where to reach the VM under its new name, as ls reports them. */
+  ssh_dest: string;
+  https_url: string;
 }
 
 /** The response to `pause`. */

@@ -1980,8 +1980,14 @@ export class VM {
     if (newname === this.name) return this;
     const result = await this.#transport.call("rename", [this.name, newname], options, {}, true);
     if (result?.new_name !== newname || result?.old_name !== this.name) throw new ExeProtocolError("rename");
-    // Destinations and other metadata may have changed. Do not invent URLs.
-    this.#info = Object.freeze({ name: newname, tags: this.tags });
+    // The destinations change with the name: take the server's, never
+    // invent them. Older servers do not report them, and then they are unknown.
+    const { sshDest: _, httpsUrl: __, ...kept } = this.#info;
+    this.#info = Object.freeze({
+      ...kept, name: newname,
+      ...typeof result.ssh_dest === "string" && result.ssh_dest ? { sshDest: result.ssh_dest } : {},
+      ...typeof result.https_url === "string" && result.https_url ? { httpsUrl: result.https_url } : {},
+    });
     return this;
   }
 

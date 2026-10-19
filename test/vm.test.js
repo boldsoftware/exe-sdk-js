@@ -108,23 +108,42 @@ test("ls, vm and refresh return the same VM API; metadata is a read-only snapsho
   assert.throws(() => exe.vm("-lroot"), TypeError);
 });
 
-test("rename updates the reference only on success and invalidates old URLs", async () => {
+test("rename updates the reference only on success, with the server's new destinations", async () => {
   const { exe, commands } = fixture((command) => {
     if (command === "ls") return json({ vms: [info()] });
-    if (command === "rename worker renamed") return json({ old_name: "worker", new_name: "renamed" });
+    if (command === "rename worker renamed") return json({
+      status: "renamed", old_name: "worker", new_name: "renamed",
+      ssh_dest: "renamed.exe.xyz", https_url: "https://renamed.exe.xyz",
+    });
     if (command.startsWith("rename")) return json({ error: "taken" }, 422);
     return exited();
   });
   const [vm] = await exe.ls();
+  const before = vm.info;
   await assert.rejects(vm.rename("taken"), ExeAPIError);
   assert.equal(vm.name, "worker");
   assert.equal(await vm.rename("renamed"), vm);
   assert.equal(vm.name, "renamed");
-  assert.equal(vm.httpsUrl, undefined);
-  assert.equal(vm.sshDest, undefined);
+  assert.equal(vm.httpsUrl, "https://renamed.exe.xyz");
+  assert.equal(vm.sshDest, "renamed.exe.xyz");
+  // What a rename cannot change is kept.
+  assert.deepEqual({ ...vm.info }, { ...before, name: "renamed", sshDest: "renamed.exe.xyz", httpsUrl: "https://renamed.exe.xyz" });
+  assert.ok(Object.isFrozen(vm.info));
+  assert.equal(before.name, "worker", "earlier snapshots do not change");
   await vm.rename("renamed"); // Server's same-name case returns text; don't send it.
   await vm.ssh("true");
   assert.deepEqual(commands, ["ls", "rename worker taken", "rename worker renamed", "ssh renamed true"]);
+});
+
+test("rename against a server that does not report destinations leaves them unknown", async () => {
+  const { exe } = fixture((command) => command === "ls" ? json({ vms: [info()] }) :
+    json({ status: "renamed", old_name: "worker", new_name: "renamed" }));
+  const [vm] = await exe.ls();
+  await vm.rename("renamed");
+  assert.equal(vm.httpsUrl, undefined, "never the old URL, nor a guess");
+  assert.equal(vm.sshDest, undefined);
+  assert.equal(vm.info.comment, "hello");
+  assert.deepEqual(vm.tags, ["test"]);
 });
 
 test("restart and resume also wait by default, with an opt-out", async () => {

@@ -67,7 +67,8 @@ its name, with no tags; call `refresh()` to fetch the rest. A copy from `cp()`
 has the tags and web URL the server reports for it. The SDK's own operations
 update the snapshot: a VM that passed a readiness wait is `running`, and
 `pause()`, `resume()`, `comment()`, and `tag()` record what they changed. A
-successful `rename()` updates the same object and invalidates old destinations.
+successful `rename()` updates the same object, with the new SSH destination and
+web URL the server reports.
 Other references, and changes made elsewhere, need `refresh()`.
 
 ## Readiness and cancellation

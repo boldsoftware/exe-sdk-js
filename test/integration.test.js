@@ -115,8 +115,12 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
   await t.test("rename updates subsequent operations on the same object", async () => {
     assert.equal(await vm.rename(renamed), vm);
     assert.equal(vm.name, renamed);
+    // The new destinations come with the rename, before any refresh.
+    const destinations = { sshDest: vm.sshDest, httpsUrl: vm.httpsUrl };
+    assert.match(destinations.httpsUrl ?? "", new RegExp(`^https://${renamed}\\.`));
     if (!skipSSH) assert.equal((await vm.ssh("printf renamed")).stdout, "renamed");
     assert.equal((await vm.refresh()).name, renamed);
+    assert.deepEqual({ sshDest: vm.sshDest, httpsUrl: vm.httpsUrl }, destinations);
     assert.deepEqual((await exe.ls(renamed)).map((v) => v.name), [renamed]);
   });
   await t.test("a failed setup script is reported with its exit code and output", { skip: skipSSH }, async () => {
