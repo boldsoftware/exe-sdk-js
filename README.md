@@ -123,6 +123,9 @@ permission: the probe is refused, and the error says to use
 Caller cancellation preserves `signal.reason`, including during streaming and
 callbacks, rather than wrapping it in another error. An aborted creation may
 still have created a VM; use an explicit name or `ls()` to recover it.
+Aborting `vm.ssh()` closes its connection but does not stop the command on the
+VM: one that is quiet, or writes only to files, keeps running. To bound a
+command's run time, bound it on the VM too, for example with `timeout 60 make`.
 
 ## Running commands
 

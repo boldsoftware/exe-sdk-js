@@ -29,6 +29,10 @@ Changed:
 Removed:
 - `exe.poolHosts()`: the server no longer has `pool hosts`.
 
+Known issue: since VMs' SSH server stopped killing a session's command when
+its connection drops (exe, 2026-11-06), aborting `vm.ssh()` leaves the command
+running on the VM; the README now says so.
+
 Docs: the README's token command quotes `--cmds` so the token gets every
 command listed; the quick start no longer emails an invitation to an example
 address; runtime and CommonJS support, egress, and token scoping are
