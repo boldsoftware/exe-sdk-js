@@ -133,6 +133,7 @@ export class Transport {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.#token}`,
+          "User-Agent": "exedev-js",
           "Content-Type": "text/plain",
           Accept: "application/json, application/x-ndjson",
         },
@@ -223,8 +224,16 @@ export function commandLine(
       case "number":
       case "string": words.push(`--${key}=${quote(String(value))}`); break;
       case "repeated":
-        for (const v of [value].flat()) words.push(`--${key}=${quote(String(v))}`);
+      case "nonempty": {
+        const values = [value].flat();
+        if (kind === "nonempty" && Array.isArray(value) && (values.length === 0 || values.some((v) => String(v) === ""))) {
+          // Omitting this flag widens what the command grants. (A lone
+          // string, even empty, is sent as it was when it took one value.)
+          throw new TypeError(`${path}: ${key} must name at least one value, and no empty ones; omit it instead`);
+        }
+        for (const v of values) words.push(`--${key}=${quote(String(v))}`);
         break;
+      }
       default: throw new TypeError(`${path}: unknown option ${JSON.stringify(key)}`);
     }
   }
@@ -404,6 +413,12 @@ function errorText(body: string): string | undefined {
   if (typeof doc?.error !== "string") return undefined;
   const text = doc.error.replace(escapes, "").replace(/\s+/g, " ").replace(controls, "").trim();
   return text.length > 200 ? `${text.slice(0, 199)}…` : text || undefined;
+}
+/** The server's code for the failure in body, if it gave one. Act on this, not on the error's wording. */
+export function errorCode(body: string): string | undefined {
+  const doc = parseDocuments(body)?.find((d) => typeof (d as { error?: unknown } | null)?.error === "string");
+  const code = (doc as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" ? code : undefined;
 }
 export function isErrorDocument(doc: unknown): boolean {
   return typeof doc === "object" && doc !== null && !Array.isArray(doc) && Object.keys(doc).length === 1 && "error" in doc;

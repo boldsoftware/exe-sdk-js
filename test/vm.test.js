@@ -56,7 +56,7 @@ test("new waits for SSH, retrying only probes; user commands run once", async (t
   const { exe, commands } = fixture((command) => {
     if (command.startsWith("new")) return json(info());
     if (command === "ssh worker true" && ++probes < 3) {
-      return json({ error: "failed to connect to VM: connection refused" }, 422);
+      return json({ code: "vm_unreachable", error: "failed to connect to VM: connection refused" }, 422);
     }
     return exited();
   });
@@ -195,7 +195,7 @@ test("readiness cancellation interrupts backoff and keeps the caller's reason", 
   const time = clock(t);
   const abort = new AbortController();
   const reason = new Error("cancelled by caller");
-  const { exe, commands } = fixture(() => json({ error: "failed to connect to VM" }, 422));
+  const { exe, commands } = fixture(() => json({ code: "vm_unreachable", error: "failed to connect to VM" }, 422));
   const waiting = exe.vm("worker").waitUntilReady({ signal: abort.signal });
   const rejected = assert.rejects(waiting, (err) => err === reason);
   await time.scheduled(100);
@@ -394,4 +394,44 @@ test("results about another VM do not change this one's snapshot", async () => {
   await vm.pause();
   await vm.comment("x");
   assert.deepEqual({ ...vm.info }, { name: "worker", tags: [] });
+});
+
+test("readiness does not retry a 422 without the vm_unreachable code", async () => {
+  const { exe, commands } = fixture((command) => command.startsWith("new") ? json(info()) :
+    json({ code: "vm_not_running", error: "failed to connect to VM" }, 422));
+  await assert.rejects(exe.new(), (err) => err instanceof VMReadyError && err.cause instanceof ExeAPIError);
+  assert.deepEqual(commands, ["new", "ssh worker true"]);
+});
+
+test("egress: set at creation, changed on the VM, and kept in its snapshot", async () => {
+  const { exe, commands } = fixture((command) => {
+    if (command.startsWith("new")) return json({ ...info(), egress_policy: "integrations" });
+    if (command.startsWith("egress")) return json({ vm_name: "worker", egress_policy: "all" });
+    return json({ vms: [{ ...info(), egress_policy: "bogus" }] });
+  });
+  const vm = await exe.new({ egress: "integrations", waitUntil: "created" });
+  assert.equal(vm.info.egressPolicy, "integrations");
+  assert.deepEqual(await vm.egress("all"), { vm_name: "worker", egress_policy: "all" });
+  assert.equal(vm.info.egressPolicy, "all");
+  await vm.egress();
+  const [listed] = await exe.ls();
+  assert.equal(listed.info.egressPolicy, undefined);
+  assert.deepEqual(commands, ["new --egress=integrations", "egress worker all", "egress worker", "ls"]);
+});
+
+test("ssh-key add scopes to several VMs, and refuses an empty scope rather than widening it", async () => {
+  const { exe, commands } = fixture(() => json({}));
+  await exe.sshKeyAdd("ssh-ed25519 AAAA k", { vm: ["web", "db"], "ssh-user": "deploy", ips: "203.0.113.0/24" });
+  assert.match(commands[0], /--vm=web --vm=db/);
+  for (const vm of [[], ["web", ""]]) {
+    await assert.rejects(exe.sshKeyAdd("ssh-ed25519 AAAA k", { vm }), TypeError);
+  }
+  assert.equal(commands.length, 1);
+});
+
+test("requests identify the SDK", async () => {
+  let headers;
+  const exe = exedev({ token: "test", fetch: async (_url, init) => { headers = init.headers; return json({ email: "a@b" }); } });
+  await exe.whoami();
+  assert.match(headers["User-Agent"], /^exedev-js/);
 });

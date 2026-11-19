@@ -43,7 +43,7 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
   });
   await t.test(skipSSH ? "new (SSH readiness explicitly skipped)" : "new returns an SSH-ready VM; first user command needs no retry", async () => {
     try {
-      vm = await exe.new({ name, comment: "sdk integration test", signal: t.signal, ...ready });
+      vm = await exe.new({ name, comment: "sdk integration test", env: ["SDK_TEST_ENV=from new"], signal: t.signal, ...ready });
     } catch (err) {
       if (err instanceof VMReadyError) vm = err.vm;
       // Opt in to server diagnostics for these non-secret test commands.
@@ -59,6 +59,8 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     assert.equal(res.exitCode, 7);
     assert.equal(res.stdout, "to-stdout\n");
     assert.equal(res.stderr, "to-stderr\n");
+    // new's env reaches commands in a non-login shell.
+    assert.equal((await vm.ssh('printf %s "$SDK_TEST_ENV"')).stdout, "from new");
   });
   await t.test("ls and refresh return usable VM objects", async () => {
     const listed = (await exe.ls()).find((v) => v.name === name);
@@ -66,6 +68,7 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     assert.ok(listed.tags.includes(tag));
     assert.equal(listed.info.comment, "sdk integration test");
     assert.ok(Math.abs(Date.parse(listed.info.createdAt) - Date.now()) < 3_600_000);
+    assert.equal(listed.info.egressPolicy, "all");
     assert.equal(await vm.refresh(), vm);
     assert.match(vm.httpsUrl, /^https:\/\//);
     if (!skipSSH) assert.equal((await listed.ssh("true")).exitCode, 0);
@@ -91,9 +94,10 @@ test("integration", { skip, timeout: 300_000 }, async (t) => {
     }), (err) => err === reason);
   });
   await t.test(skipSSH ? "cp (SSH readiness explicitly skipped)" : "cp returns an independently usable SSH-ready VM", async () => {
-    const copy = await vm.cp({ name: copyName, signal: t.signal, ...ready });
+    const copy = await vm.cp({ name: copyName, egress: "integrations", signal: t.signal, ...ready });
     assert.ok(copy instanceof VM);
     assert.equal(copy.name, copyName);
+    assert.equal(copy.info.egressPolicy, "integrations");
     if (!skipSSH) assert.equal((await copy.ssh("printf copy-ready")).stdout, "copy-ready");
     const { deleted, failed } = await copy.rm();
     assert.deepEqual({ deleted, failed }, { deleted: [copyName], failed: [] });

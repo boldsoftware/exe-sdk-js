@@ -6,19 +6,24 @@ Official JavaScript/TypeScript SDK for the [exe.dev](https://exe.dev) HTTPS API.
 npm install @exedev/sdk
 ```
 
+The package is ESM only, with no dependencies, and uses the runtime's `fetch`.
+It runs on Node 18 and later, Bun, and Deno. From CommonJS, use
+`await import("@exedev/sdk")`, or `require()` on Node 20.19+ or 22.12+, which
+load ES modules synchronously. You need an exe.dev API token: see
+[Authentication](#authentication).
+
 ## Quick start
 
 ```ts
 import exedev from "@exedev/sdk";
 
 const exe = exedev({ token: process.env.EXE_TOKEN! });
-const vm = await exe.new({ name: "my-vm", image: "ubuntu:24.04", tag: ["dev"] });
+const vm = await exe.new({ image: "ubuntu:24.04" });
 // new waits for SSH by default. No create-then-ssh retry loop is needed.
 try {
   console.log(vm.name, vm.httpsUrl);
   const result = await vm.ssh("uname -a");
   console.log(result.exitCode, result.stdout, result.stderr);
-  await vm.shareAdd("friend@example.com", { message: "have a look" });
 } finally {
   await vm.rm();
 }
@@ -61,15 +66,29 @@ may return JSON or text and are typed as `unknown`.
 
 `vm.name` is the current name. `vm.httpsUrl`, `vm.sshDest`, and `vm.tags` expose
 common metadata. `vm.info` is a read-only snapshot with `status`, `region`,
-`comment`, `createdAt`, and `promptError` (why `new`'s `prompt` did not reach
-Shelley) when available. A reference from `exe.vm(name)` initially knows only
+`comment`, `createdAt`, `egressPolicy`, and `promptError` (why `new`'s `prompt`
+did not reach Shelley) when available. A reference from `exe.vm(name)` initially knows only
 its name, with no tags; call `refresh()` to fetch the rest. A copy from `cp()`
 has the tags and web URL the server reports for it. The SDK's own operations
 update the snapshot: a VM that passed a readiness wait is `running`, and
-`pause()`, `resume()`, `comment()`, and `tag()` record what they changed. A
+`pause()`, `resume()`, `comment()`, `tag()`, and `egress()` record what they
+changed. A
 successful `rename()` updates the same object, with the new SSH destination and
 web URL the server reports.
 Other references, and changes made elsewhere, need `refresh()`.
+
+## Egress
+
+A VM may reach all of the internet (`"all"`, the default), or only exe.dev's
+metadata service and the integrations attached to it (`"integrations"`). Set it
+at creation, so the VM never has a window with internet access, or later:
+
+```ts
+const vm = await exe.new({ egress: "integrations" });
+const copy = await vm.cp({ egress: "all" }); // a copy keeps its source's unless told otherwise
+await vm.egress("all");                        // change it; vm.egress() alone reports it
+console.log(vm.info.egressPolicy);
+```
 
 ## Readiness and cancellation
 
@@ -119,8 +138,8 @@ await vm.ssh(`cat ${quote(path)}`);
 ```
 
 Commands run in a non-login shell. Variables from `new`'s `env` are set for
-them (once the VM's exe-init has the update that does so; until then use
-`bash -lc`). Long silent commands are fine: the server keeps the response alive.
+them. Long silent commands are fine: unlike other commands, `ssh` has no
+30-second limit, and the server keeps the response alive.
 
 ```ts
 await vm.ssh("make", {
@@ -175,10 +194,19 @@ mutation or remote command after a transport failure.
 Generate a token via SSH:
 
 ```sh
-ssh exe.dev ssh-key generate-api-key --label=my-app --exp=30d --cmds="new,ls,ssh,share add,rm"
+ssh exe.dev ssh-key generate-api-key --label=my-app --exp=30d '--cmds="new,ls,ssh,rm"'
 ```
 
-See the [HTTPS API docs](https://exe.dev/docs/https-api) for permissions and scoping.
+Keep the single quotes around `--cmds`: ssh passes the command to exe.dev as
+one line, so a list with spaces (such as `"share add"`) must stay quoted there.
+`--cmds` lists the commands the token may run: include `ssh`, which `new`'s
+readiness wait uses, or create VMs with `waitUntil: "created"`. For
+automation, prefer a token scoped to a tag (`--tag=my-app`): it can see and
+manage only the VMs with that tag, and VMs it creates get the tag. A token can
+also be limited to client addresses (`--ips=203.0.113.0/24`), or
+[signed locally](https://exe.dev/docs/https-api-local-key) from an SSH key you
+added to your account. See the [HTTPS API docs](https://exe.dev/docs/https-api)
+for permissions and scoping.
 
 ## Development
 
