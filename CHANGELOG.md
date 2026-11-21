@@ -5,6 +5,12 @@
 Synced with the exe.dev server's commands as of 2026-11-19.
 
 New:
+- Files on a VM: `vm.writeFile()`, `vm.readFile()`, `vm.upload()`, and
+  `vm.download()`, with `VMFileError` and `CommandError`.
+- `onStdoutBytes` and `onStderrBytes`: `vm.ssh()` callbacks with raw bytes.
+- `exe.exec(line)` runs any command line, for commands without a method.
+- The token defaults to `$EXE_TOKEN`.
+- `signToken()` signs API and VM tokens locally from an OpenSSH key.
 - Egress policy: `exe.new({ egress: "integrations" })` and `vm.cp({ egress })`
   set what a VM may reach at creation; `vm.egress(policy?)` shows or changes
   it; `vm.info.egressPolicy` and the `egress_policy` of `ls`, `new`, and `cp`
@@ -23,6 +29,8 @@ New:
 - Requests send `User-Agent: exedev-js`.
 
 Changed:
+- **Breaking:** `vm.resume()` resolves to the server's result, with
+  `cold_booted`, instead of the VM.
 - Readiness retries only failures the server marks `vm_unreachable`, rather
   than matching its error text.
 

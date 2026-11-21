@@ -17,7 +17,7 @@ load ES modules synchronously. You need an exe.dev API token: see
 ```ts
 import exedev from "@exedev/sdk";
 
-const exe = exedev({ token: process.env.EXE_TOKEN! });
+const exe = exedev(); // the token is $EXE_TOKEN; or pass { token }
 const vm = await exe.new({ image: "ubuntu:24.04" });
 // new waits for SSH by default. No create-then-ssh retry loop is needed.
 try {
@@ -31,7 +31,8 @@ try {
 
 ## Client and VM API
 
-`exedev({ token, baseURL?, fetch? })` creates a client. `baseURL` defaults to
+`exedev({ token?, baseURL?, fetch? })` creates a client. `token` defaults to
+the `EXE_TOKEN` environment variable (Node, Bun, Deno). `baseURL` defaults to
 `https://exe.dev`; `fetch` defaults to the global implementation. Named imports
 of `exedev`, `ExedevClient`, and `VM` are also available.
 
@@ -45,13 +46,17 @@ of `exedev`, `ExedevClient`, and `VM` are also available.
   deletes several at a time. It resolves to `{ deleted, failed, not_found,
   errors }` rather than throwing for VMs it could not delete.
 - Lifecycle and VM-scoped commands are methods on the VM: `vm.rm()`,
-  `vm.pause()`, `vm.resume()`, `vm.restart()`, `vm.rename(newName)`,
+  `vm.pause()`, `vm.resume()` (its result's `cold_booted` is `"true"` when the VM booted afresh
+and lost its memory), `vm.restart()`, `vm.rename(newName)`,
   `vm.resize(options)`, `vm.stat(options)`, `vm.tag(tags)`, `vm.comment(text)`,
   `vm.shareShow()`, `vm.sharePort(port)`, and the other generated VM commands.
 - Account commands remain on the client: `exe.whoami()`, `exe.sshKeyList()`,
   `exe.integrationsList()`, `exe.billingPlan()`, etc.
 
-There is no parallel raw-command API or client-level `ssh` or `cp`. `vm.rm()`
+`exe.exec(line)` runs a command line as you would type it after
+`ssh exe.dev`, for anything that has no method yet: it returns the JSON result,
+or text if there is none. Quote interpolated values with `quote`. There is no
+client-level `ssh` or `cp`: those are VM methods. `vm.rm()`
 throws `ExeAPIError` if the VM is not deleted, with `status` 404 if it does not
 exist.
 Options for generated commands retain CLI flag names (for example,
@@ -152,6 +157,8 @@ await vm.ssh("make", {
 });
 ```
 
+`onStdoutBytes` and `onStderrBytes` receive the raw bytes instead, for binary
+output; they may be given alongside the text callbacks.
 Callbacks are awaited serially, with incremental UTF-8 decoding per stream.
 Their cross-stream order is approximate. Throwing from a callback cancels the
 response and rejects with that error.
@@ -162,6 +169,22 @@ throws `SSHStreamError` with code `output_limit`. Set `capture: false` for
 bounded-memory streaming of arbitrarily long output: callbacks still receive
 it, but result/error output is empty and `captured` is false. The capture limit
 is ignored in this mode. Invalid or oversized NDJSON frames are always rejected.
+
+## Files
+
+```ts
+await vm.writeFile("app/config.json", JSON.stringify(config)); // relative to the home directory
+const data = await vm.readFile("/etc/os-release");              // a Uint8Array
+await vm.upload("./site", "site", { exclude: [".git", "node_modules"] });
+await vm.download("logs", "./logs");
+```
+
+Requests carry at most 64 KB and `ssh` has no stdin, so files travel as base64
+in parts, several at a time. The VM needs `base64`, and `gzip` and `tar` for
+large files and directories, which exeuntu has. `writeFile` replaces the file
+and makes its directory; `mode` sets its permissions. A missing path is a
+`VMFileError` (`code` `ENOENT` or `EISDIR`); a failed helper command is a
+`CommandError`. `upload` and `download` need `node:fs` (Node, Bun, Deno).
 
 ## Errors
 
@@ -210,6 +233,20 @@ also be limited to client addresses (`--ips=203.0.113.0/24`), or
 [signed locally](https://exe.dev/docs/https-api-local-key) from an SSH key you
 added to your account. See the [HTTPS API docs](https://exe.dev/docs/https-api)
 for permissions and scoping.
+
+`signToken` signs a token locally, with no request, from an OpenSSH private key
+whose public key is on your account (`ssh exe.dev ssh-key add`); removing the
+key revokes every token it signed. It takes Ed25519, ECDSA, and RSA keys
+without a passphrase.
+
+```ts
+import exedev, { signToken } from "@exedev/sdk";
+const token = await signToken({
+  privateKey: await readFile(`${homedir()}/.ssh/exe_dev_api`, "utf8"),
+  permissions: { exp: Math.floor(Date.now() / 1000) + 3600, cmds: ["new", "ls", "ssh", "rm"] },
+});
+const exe = exedev({ token });
+```
 
 ## Development
 

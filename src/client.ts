@@ -3,8 +3,15 @@
 import type { Arg, CallOptions, FlagKind } from "./commands.gen.js";
 
 export interface ExedevOptions {
-  /** API bearer token. */
-  token: string;
+  /**
+   * API bearer token; by default, the EXE_TOKEN environment variable. Its
+   * cmds decide which methods work: new() waits for SSH, so it needs ssh,
+   * and deleting VMs needs rm, neither of which a token has by default.
+   * Create one with
+   * `ssh exe.dev ssh-key generate-api-key --tag=sdk --cmds=new,ls,ssh,rm`,
+   * which may manage only VMs tagged sdk, or sign one with signToken().
+   */
+  token?: string;
   /** Defaults to https://exe.dev. */
   baseURL?: string;
   /** Defaults to global fetch. */
@@ -15,6 +22,13 @@ export interface SSHOptions extends CallOptions {
   /** Awaited serially as UTF-8 output arrives. Throwing cancels the response. */
   onStdout?: (data: string) => void | Promise<void>;
   onStderr?: (data: string) => void | Promise<void>;
+  /**
+   * Awaited serially with output's raw bytes as they arrive, for binary
+   * output. Each call's bytes are the callback's to keep. Throwing cancels
+   * the response. They may be given with onStdout and onStderr.
+   */
+  onStdoutBytes?: (data: Uint8Array) => void | Promise<void>;
+  onStderrBytes?: (data: Uint8Array) => void | Promise<void>;
   /** Retain output in the result/error. Set false for bounded-memory streaming. Default true. */
   capture?: boolean;
   /** Maximum combined captured bytes. Default 8 MiB. Ignored with capture: false. */
@@ -69,6 +83,12 @@ export class ExeNetworkError extends Error {
   details(): { cause: unknown } { return { cause: this.#cause }; }
 }
 
+/** EXE_TOKEN, where there is an environment to read it from (Node, Bun, Deno). */
+function envToken(): string | undefined {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return env?.EXE_TOKEN || undefined;
+}
+
 /** A system error code such as ECONNRESET or UND_ERR_SOCKET, from fetch's error or its cause. */
 function networkCode(err: unknown): string | undefined {
   for (let e = err, depth = 0; e && typeof e === "object" && depth < 3; e = (e as { cause?: unknown }).cause, depth++) {
@@ -119,9 +139,10 @@ export class Transport {
   readonly #token: string;
   readonly #baseURL: string;
   readonly #fetch: typeof fetch;
-  constructor(opts: ExedevOptions) {
-    if (!opts?.token) throw new Error("exedev: token is required");
-    this.#token = opts.token;
+  constructor(opts: ExedevOptions = {}) {
+    const token = opts.token ?? envToken();
+    if (!token) throw new Error("exedev: an API token is required: pass token or set EXE_TOKEN");
+    this.#token = token;
     this.#baseURL = (opts.baseURL ?? "https://exe.dev").replace(/\/$/, "");
     this.#fetch = opts.fetch ?? ((input, init) => fetch(input, init));
   }
@@ -170,6 +191,16 @@ export class Transport {
       return body;
     }
     if (docs.some(isErrorDocument)) throw new ExeAPIError(path, status, body);
+    return docs.length === 1 ? docs[0] : docs;
+  }
+  /** Run a command line as it is, for exec(). */
+  async exec(command: string, options?: CallOptions): Promise<unknown> {
+    const res = await this.#post("exec", command, options);
+    const body = await this.#text("exec", res, options?.signal);
+    if (!res.ok) throw new ExeAPIError("exec", res.status, body);
+    const docs = parseDocuments(body);
+    if (docs === undefined) return body;
+    if (docs.some(isErrorDocument)) throw new ExeAPIError("exec", res.status, body);
     return docs.length === 1 ? docs[0] : docs;
   }
   /** A successful response's JSON documents, including any in-band error documents. */
@@ -274,6 +305,7 @@ async function readSSHOutput(
   const chunks: Record<StreamName, Uint8Array[]> = { stdout: [], stderr: [] };
   const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
   const callbacks = { stdout: options.onStdout, stderr: options.onStderr };
+  const byteCallbacks = { stdout: options.onStdoutBytes, stderr: options.onStderrBytes };
   let count = 0;
   let exitCode: number | undefined;
   let terminal = false;
@@ -299,6 +331,13 @@ async function readSSHOutput(
         if (count + bytes.length > maxOutputBytes) throw failure("output_limit");
         count += bytes.length;
         chunks[name].push(bytes);
+      }
+      const onBytes = byteCallbacks[name];
+      if (onBytes && bytes.length > 0) {
+        // Captured bytes stay the SDK's: the callback gets its own copy.
+        const copy = capture ? bytes.slice() : bytes;
+        await abortable(Promise.resolve().then(() => onBytes(copy)), signal);
+        signal?.throwIfAborted();
       }
       if (callbacks[name]) await deliver(name, decoders[name].decode(bytes, { stream: true }));
       return;

@@ -2,6 +2,8 @@
 
 import { Transport, ExeAPIError, ExeProtocolError, SSHStreamError, abortable, delay, errorCode, isErrorDocument } from "./client.js";
 import type { ExedevOptions, SSHOptions, SSHResult } from "./client.js";
+import { download, readFile, upload, writeFile } from "./files.js";
+import type { UploadOptions, WriteFileOptions } from "./files.js";
 import type { CommandResults, EgressPolicy, RmResponse } from "./types.js";
 
 export interface CallOptions { signal?: AbortSignal; }
@@ -623,7 +625,20 @@ export interface StatOptions extends CallOptions {
 
 export class ExedevClient {
   readonly #transport: Transport;
-  constructor(options: ExedevOptions) { this.#transport = new Transport(options); }
+  /** By default, the token is the EXE_TOKEN environment variable. */
+  constructor(options?: ExedevOptions) { this.#transport = new Transport(options); }
+
+  /**
+   * Run a command line as it is, as typed after ssh exe.dev, for what has
+   * no method yet: exe.exec("whoami"). Values interpolated into it need
+   * quote(). Returns its JSON result, or its text if it has none, and throws
+   * ExeAPIError if it fails. Run commands on a VM with vm.ssh(), not here.
+   */
+  async exec(command: string, options?: CallOptions): Promise<unknown> {
+    if (typeof command !== "string" || !command.trim()) throw new TypeError("exedev: exec takes a nonempty command line");
+    if (/^\s*ssh(?:\s|$)/.test(command)) throw new TypeError("exedev: run commands on a VM with vm.ssh(), not exec()");
+    return this.#transport.exec(command, options);
+  }
 
   /** Reference an existing VM without a request. Use refresh() to fetch its metadata. */
   vm(name: string): VM {
@@ -821,8 +836,9 @@ export class ExedevClient {
    * # Generate a key for the exe.dev API (lobby commands like ls, new, whoami):
    * ssh-key generate-api-key --label=ci --cmds=ls,new --exp=90d
    *
-   * # Generate a key that manages only VMs tagged ci (VMs it creates get the tag):
-   * ssh-key generate-api-key --label=ci --tag=ci --exp=90d
+   * # Generate a key that creates, lists, runs commands on, and deletes
+   * # only VMs tagged ci (VMs it creates get the tag):
+   * ssh-key generate-api-key --label=ci --tag=ci --cmds=new,ls,ssh,rm --exp=90d
    *
    * # Generate a key scoped to a VM (authenticates to its HTTPS proxy):
    * ssh-key generate-api-key --vm=my-vm --label=deploy
@@ -1957,6 +1973,47 @@ export class VM {
     return this.#transport.ssh(this.name, command, options);
   }
 
+  /**
+   * Write a file on the VM, replacing it, and making its directory if need
+   * be. path is relative to the home directory unless it is absolute. A
+   * string is written as UTF-8. A request carries at most 64 KB, so a large
+   * file goes in parts, several at a time. The VM needs base64, and gzip for
+   * a large file. Requires ssh permission.
+   */
+  writeFile(path: string, data: string | Uint8Array, options?: WriteFileOptions): Promise<void> {
+    return writeFile(this, path, data, options);
+  }
+
+  /**
+   * The contents of a file on the VM; VMFileError with code ENOENT if there
+   * is none. path is relative to the home directory unless it is absolute.
+   * Decode text with new TextDecoder().decode(data). Requires ssh permission.
+   */
+  readFile(path: string, options?: CallOptions): Promise<Uint8Array> {
+    return readFile(this, path, options);
+  }
+
+  /**
+   * Copy a local file or directory to the VM. A file is written to remote,
+   * with its permissions. A directory's contents are copied into remote,
+   * which is made if need be. The VM needs tar for a directory. Needs
+   * node:fs (Node.js, Bun, or Deno). Requires ssh permission.
+   */
+  upload(local: string, remote: string, options?: UploadOptions): Promise<void> {
+    return upload(this, local, remote, options);
+  }
+
+  /**
+   * Copy a file or directory from the VM. A file is written to local. A
+   * directory's contents are copied into local, which is made if need be;
+   * members that would land outside it are refused. A remote path that does
+   * not exist throws VMFileError. The VM needs tar for a directory. Needs
+   * node:fs (Node.js, Bun, or Deno). Requires ssh permission.
+   */
+  download(remote: string, local: string, options?: CallOptions): Promise<void> {
+    return download(this, remote, local, options);
+  }
+
   /** Refresh metadata without changing this reference's identity. Requires ls permission. */
   async refresh(options?: CallOptions): Promise<this> {
     const result = await this.#transport.call("ls", [this.name], options, {}, true);
@@ -2075,15 +2132,17 @@ export class VM {
    *
    * Usage: `resume <vmname>`
    *
+   * Its result's cold_booted is "true" when the VM booted from its disk instead of restoring its memory: processes it was running are gone.
+   *
    * Tag-scoped API keys may run this command.
    */
-  async resume(options?: ReadyOptions): Promise<this> {
+  async resume(options?: ReadyOptions): Promise<CommandResult<"resume">> {
     const ready = readiness(options ?? {});
     const { waitUntil, timeoutMs, ...flags } = options ?? {};
     const result = await this.#transport.call("resume", [this.name], flags, {}, true);
     this.#absorb(result);
     if (ready) await this.waitUntilReady(ready);
-    return this;
+    return result;
   }
 
   /**

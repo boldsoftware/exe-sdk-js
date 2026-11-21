@@ -18,8 +18,13 @@ async function publicAPI() {
   console.log(me);
   // @ts-expect-error VM operations are not duplicated on the client.
   await exe.ssh("worker", "true");
-  // @ts-expect-error Raw execution is not a parallel API.
-  await exe.exec("new");
+  // Raw command lines, for what has no method yet.
+  const raw: unknown = await exe.exec("whoami");
+  console.log(raw);
+  // @ts-expect-error resume reports the server's result, not the VM.
+  (await vm.resume()).rm();
+  const cold: "true" | "false" = (await vm.resume()).cold_booted;
+  console.log(cold);
   // @ts-expect-error new returns a VM, not the wire record.
   console.log(vm.vm_name);
   // @ts-expect-error The bound VM name is not an ssh argument.

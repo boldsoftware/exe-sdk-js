@@ -46,6 +46,13 @@ test("client posts the command with a bearer token", async () => {
 
 test("a token is required", () => {
   assert.throws(() => exedev({ token: "" }), /token is required/);
+  const saved = process.env.EXE_TOKEN;
+  delete process.env.EXE_TOKEN;
+  try {
+    assert.throws(() => exedev(), /pass token or set EXE_TOKEN/);
+  } finally {
+    if (saved !== undefined) process.env.EXE_TOKEN = saved;
+  }
 });
 
 test("new returns a VM with normalized metadata", async () => {

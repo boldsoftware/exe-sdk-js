@@ -6,8 +6,13 @@ import type { ExedevOptions } from "./client.js";
 export { ExedevClient, VM, VMReadyError, VMSetupError } from "./commands.gen.js";
 export { ExeAPIError, ExeNetworkError, ExeProtocolError, SSHStreamError, quote } from "./client.js";
 export type { ExedevOptions, SSHOptions, SSHResult } from "./client.js";
+export { CommandError, VMFileError } from "./files.js";
+export type { UploadOptions, WriteFileOptions } from "./files.js";
+export { signToken } from "./token.js";
+export type { SignTokenOptions, TokenPermissions } from "./token.js";
 export type * from "./commands.gen.js";
 export type * from "./types.js";
 
-export function exedev(options: ExedevOptions): ExedevClient { return new ExedevClient(options); }
+/** An exe.dev client. By default, its token is the EXE_TOKEN environment variable. */
+export function exedev(options?: ExedevOptions): ExedevClient { return new ExedevClient(options); }
 export default exedev;

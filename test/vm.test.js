@@ -147,17 +147,20 @@ test("rename against a server that does not report destinations leaves them unkn
 });
 
 test("restart and resume also wait by default, with an opt-out", async () => {
-  const { exe, commands } = fixture((command) => command.startsWith("ssh") ? exited() : json({}));
+  const resumed = { vm_name: "worker", status: "running", cold_booted: "true" };
+  const { exe, commands } = fixture((command) =>
+    command.startsWith("ssh") ? exited() : command.startsWith("resume") ? json(resumed) : json({}));
   const vm = exe.vm("worker");
   assert.equal(await vm.restart(), vm);
-  assert.equal(await vm.resume(), vm);
+  // resume reports whether the VM lost its memory.
+  assert.deepEqual(await vm.resume(), resumed);
   await vm.restart({ waitUntil: "created" });
   assert.deepEqual(commands, ["restart worker", "ssh worker true", "resume worker", "ssh worker true", "restart worker"]);
 });
 
-test("VM operations and raw transport are not a parallel client API", () => {
+test("VM operations are not a parallel client API", () => {
   const { exe } = fixture(() => json({}));
-  for (const name of ["ssh", "cp", "pause", "resume", "restart", "rename", "resize", "stat", "shareShow", "exec", "run"]) {
+  for (const name of ["ssh", "cp", "pause", "resume", "restart", "rename", "resize", "stat", "shareShow", "run", "writeFile", "readFile"]) {
     assert.equal(exe[name], undefined, name);
   }
   // The exception: exe.rm takes a list, to delete many VMs in one request.
@@ -379,7 +382,7 @@ test("the info snapshot follows what the SDK itself observes and changes", async
   assert.equal(vm.info.status, "paused");
   assert.equal(before.status, "running", "earlier snapshots do not change");
   assert.ok(Object.isFrozen(vm.info));
-  assert.equal(await vm.resume({ waitUntil: "created" }), vm);
+  assert.equal((await vm.resume({ waitUntil: "created" })).cold_booted, "false");
   assert.equal(vm.info.status, "running");
   await vm.comment("updated");
   assert.equal(vm.info.comment, "updated");
