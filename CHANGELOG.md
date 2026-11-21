@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+0.6.0 was not published on npm; 0.6.1 is 0.6.0 and this change.
+
+Changed:
+- Requests send `User-Agent: exedev-js/VERSION`, as the Python SDK sends
+  `exedev-python/VERSION`, and `VERSION` is exported. `npm run build` and
+  `npm version` write it from package.json to src/version.ts.
+
 ## 0.6.0
 
 Synced with the exe.dev server's commands as of 2026-11-21. 0.5.0 was never
@@ -27,9 +36,7 @@ New:
   `billingUsage({ history })`, `teamSettingsVmSharing("off")`.
 - `ResizeResponse.restart_required`; `NewResponse.created_at`; `CpResponse`
   reports `comment` and `created_at`.
-- Requests send `User-Agent: exedev-js/VERSION`, and `VERSION` is exported.
-  It is written from package.json to src/version.ts by `npm run build`
-  and `npm version`.
+- Requests send `User-Agent: exedev-js`.
 
 Changed:
 - **Breaking:** `vm.resume()` resolves to the server's result, with
