@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 New:
 - `exedev({ userAgent: "t3exe/0.1.1" })` names a tool built on the SDK:

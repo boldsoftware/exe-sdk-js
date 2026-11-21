@@ -41,7 +41,7 @@ before the SDK's own in every request's `User-Agent`. It must be visible ASCII,
 with spaces between products; anything else throws a `TypeError` at once.
 
 ```ts
-const exe = exedev({ userAgent: "mytool/1.2" }); // User-Agent: mytool/1.2 exedev-js/0.6.1
+const exe = exedev({ userAgent: "mytool/1.2" }); // User-Agent: mytool/1.2 exedev-js/0.7.0
 ```
 
 - `exe.new(options?)` creates a VM and returns a `VM` object.
