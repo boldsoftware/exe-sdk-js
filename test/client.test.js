@@ -430,3 +430,24 @@ test("requests identify the SDK and its package.json version", async () => {
   await exe().whoami();
   assert.equal(requests[0].init.headers["User-Agent"], `exedev-js/${version}`);
 });
+
+test("userAgent names a tool before the SDK in every request", async () => {
+  const tool = exedev({
+    token: "exe1.test",
+    baseURL: "https://example.test/",
+    userAgent: "t3exe/0.1.1",
+    fetch: async (url, init) => { requests.push({ url, init }); return respond(url, init); },
+  });
+  await tool.whoami();
+  await tool.vm("my-vm").ssh("true");
+  assert.deepEqual(requests.map((r) => r.init.headers["User-Agent"]), [`t3exe/0.1.1 exedev-js/${VERSION}`, `t3exe/0.1.1 exedev-js/${VERSION}`]);
+  requests = [];
+  await exedev({ token: "t", userAgent: "t3exe/0.1.1 (+https://example.com)", fetch: async (url, init) => { requests.push({ url, init }); return new Response("{}"); } }).whoami();
+  assert.equal(requests[0].init.headers["User-Agent"], `t3exe/0.1.1 (+https://example.com) exedev-js/${VERSION}`);
+});
+
+test("a bad userAgent throws when the client is made", () => {
+  for (const bad of ["", " t3exe", "t3exe ", "t3exe\r\nX-Injected: 1", "t3exe\n", "t3exe/\0", "t3exé", 1]) {
+    assert.throws(() => exedev({ token: "t", userAgent: bad }), (e) => e instanceof TypeError && /userAgent/.test(e.message), JSON.stringify(bad));
+  }
+});

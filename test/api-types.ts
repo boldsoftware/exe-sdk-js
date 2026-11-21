@@ -3,6 +3,7 @@ import type { RmResponse, NewResponse, VMRecord, WaitOptions, ResumeResponse, Sh
 
 async function publicAPI() {
   const exe = exedev({ token: "test" });
+  exedev({ token: "test", userAgent: "t3exe/0.1.1" });
   const vm: VM = await exe.new({ name: "worker", timeoutMs: 60_000 });
   const copy: VM = await vm.cp({ name: "copy", waitUntil: "created" });
   await copy.waitUntilReady();

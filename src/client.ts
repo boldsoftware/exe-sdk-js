@@ -17,6 +17,12 @@ export interface ExedevOptions {
   baseURL?: string;
   /** Defaults to global fetch. */
   fetch?: typeof fetch;
+  /**
+   * The product of a tool built on this SDK, such as "t3exe/0.1.1", which
+   * requests name before the SDK's own: "User-Agent: t3exe/0.1.1 exedev-js/0.6.1".
+   * Visible ASCII; spaces may separate products and comments.
+   */
+  userAgent?: string;
 }
 
 export interface SSHOptions extends CallOptions {
@@ -135,15 +141,30 @@ export class SSHStreamError extends Error {
   details(): { message?: string; cause?: unknown } { return { message: this.#detail, cause: this.#cause }; }
 }
 
+/**
+ * The User-Agent: the caller's product, if any, before the SDK's, which is
+ * always there (RFC 9110). A bad product throws now rather than as a request.
+ */
+function userAgent(product: string | undefined): string {
+  const sdk = `exedev-js/${VERSION}`;
+  if (product === undefined) return sdk;
+  if (typeof product !== "string" || !/^[\x21-\x7e]+(?:[ \t]+[\x21-\x7e]+)*$/.test(product)) {
+    throw new TypeError(`exedev: userAgent must be a product such as "t3exe/0.1.1": visible ASCII, separated by spaces; got ${JSON.stringify(product)}`);
+  }
+  return `${product} ${sdk}`;
+}
+
 /** Internal transport, deliberately not exported from the package entry point. */
 export class Transport {
   readonly #token: string;
   readonly #baseURL: string;
   readonly #fetch: typeof fetch;
+  readonly #userAgent: string;
   constructor(opts: ExedevOptions = {}) {
     const token = opts.token ?? envToken();
     if (!token) throw new Error("exedev: an API token is required: pass token or set EXE_TOKEN");
     this.#token = token;
+    this.#userAgent = userAgent(opts.userAgent);
     this.#baseURL = (opts.baseURL ?? "https://exe.dev").replace(/\/$/, "");
     this.#fetch = opts.fetch ?? ((input, init) => fetch(input, init));
   }
@@ -155,7 +176,7 @@ export class Transport {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.#token}`,
-          "User-Agent": `exedev-js/${VERSION}`,
+          "User-Agent": this.#userAgent,
           "Content-Type": "text/plain",
           Accept: "application/json, application/x-ndjson",
         },

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+New:
+- `exedev({ userAgent: "t3exe/0.1.1" })` names a tool built on the SDK:
+  requests send `User-Agent: t3exe/0.1.1 exedev-js/VERSION`. Anything but
+  visible ASCII, with spaces between products, is a `TypeError` at once.
+
 ## 0.6.1
 
 0.6.0 and this change.

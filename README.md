@@ -31,10 +31,18 @@ try {
 
 ## Client and VM API
 
-`exedev({ token?, baseURL?, fetch? })` creates a client. `token` defaults to
-the `EXE_TOKEN` environment variable (Node, Bun, Deno). `baseURL` defaults to
-`https://exe.dev`; `fetch` defaults to the global implementation. Named imports
-of `exedev`, `ExedevClient`, and `VM` are also available.
+`exedev({ token?, baseURL?, fetch?, userAgent? })` creates a client. `token`
+defaults to the `EXE_TOKEN` environment variable (Node, Bun, Deno). `baseURL`
+defaults to `https://exe.dev`; `fetch` defaults to the global implementation.
+Named imports of `exedev`, `ExedevClient`, and `VM` are also available.
+
+A tool built on the SDK names itself with `userAgent`, a product that goes
+before the SDK's own in every request's `User-Agent`. It must be visible ASCII,
+with spaces between products; anything else throws a `TypeError` at once.
+
+```ts
+const exe = exedev({ userAgent: "mytool/1.2" }); // User-Agent: mytool/1.2 exedev-js/0.6.1
+```
 
 - `exe.new(options?)` creates a VM and returns a `VM` object.
 - `exe.ls(nameOrPattern?, options?)` returns `VM[]`.
