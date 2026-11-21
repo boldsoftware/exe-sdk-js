@@ -27,7 +27,9 @@ New:
   `billingUsage({ history })`, `teamSettingsVmSharing("off")`.
 - `ResizeResponse.restart_required`; `NewResponse.created_at`; `CpResponse`
   reports `comment` and `created_at`.
-- Requests send `User-Agent: exedev-js`.
+- Requests send `User-Agent: exedev-js/VERSION`, and `VERSION` is exported.
+  It is written from package.json to src/version.ts by `npm run build`
+  and `npm version`.
 
 Changed:
 - **Breaking:** `vm.resume()` resolves to the server's result, with

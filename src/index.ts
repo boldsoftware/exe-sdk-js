@@ -9,6 +9,7 @@ export type { ExedevOptions, SSHOptions, SSHResult } from "./client.js";
 export { CommandError, VMFileError } from "./files.js";
 export type { UploadOptions, WriteFileOptions } from "./files.js";
 export { signToken } from "./token.js";
+export { VERSION } from "./version.js";
 export type { SignTokenOptions, TokenPermissions } from "./token.js";
 export type * from "./commands.gen.js";
 export type * from "./types.js";

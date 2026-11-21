@@ -251,8 +251,10 @@ const exe = exedev({ token });
 ## Development
 
 **All of `src/` is generated.** Edit `cmd/gensdkjs` and its TypeScript templates
-in the exe.dev repository, then run `go run ./cmd/gensdkjs` there. Copy the
-outputs into this checkout and test:
+in the exe.dev repository, then run `go run ./cmd/gensdkjs` there. The one
+exception is `src/version.ts`, which `npm run build`, `npm version`, and
+`npm run sync-commands` write from `package.json`, the version's only source.
+Copy the outputs into this checkout and test:
 
 ```sh
 npm install

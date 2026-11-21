@@ -2,7 +2,8 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { inspect } from "node:util";
-import exedev, { ExeAPIError, ExeNetworkError } from "../dist/index.js";
+import { readFileSync } from "node:fs";
+import exedev, { ExeAPIError, ExeNetworkError, VERSION } from "../dist/index.js";
 import { quote } from "../dist/client.js";
 
 let requests;
@@ -421,4 +422,11 @@ test("ssh rejects a stream that breaks off", async () => {
     assert.equal(err.code, "interrupted");
     return true;
   });
+});
+
+test("requests identify the SDK and its package.json version", async () => {
+  const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(VERSION, version);
+  await exe().whoami();
+  assert.equal(requests[0].init.headers["User-Agent"], `exedev-js/${version}`);
 });

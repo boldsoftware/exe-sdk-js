@@ -16,10 +16,11 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
-    "test": "tsc && node --test test/*.test.js",
+    "build": "node scripts/version.mjs && tsc",
+    "test": "npm run build && node --test test/*.test.js",
     "sync-commands": "sh scripts/sync-commands.sh",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "version": "node scripts/version.mjs && git add src/version.ts"
   },
   "keywords": [
     "exe.dev",
