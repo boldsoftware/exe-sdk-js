@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.5.0
+## 0.6.0
 
-Synced with the exe.dev server's commands as of 2026-11-19.
+Synced with the exe.dev server's commands as of 2026-11-21. 0.5.0 was never
+published; its changes are here.
 
 New:
 - Files on a VM: `vm.writeFile()`, `vm.readFile()`, `vm.upload()`, and
