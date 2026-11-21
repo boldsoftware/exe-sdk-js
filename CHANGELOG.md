@@ -2,7 +2,7 @@
 
 ## 0.6.1
 
-0.6.0 was not published on npm; 0.6.1 is 0.6.0 and this change.
+0.6.0 and this change.
 
 Changed:
 - Requests send `User-Agent: exedev-js/VERSION`, as the Python SDK sends
